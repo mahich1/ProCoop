@@ -1,0 +1,1447 @@
+//@version=6
+// =============================================================================
+//  ICT + CHECKLIST PRÉ-TRADE  —  ALL-IN-ONE V2.4 OPTIMIZED (NASDAQ / THE5ERS)
+//  Un seul indicateur qui combine :
+//   • Le moteur visuel ICT : Sweep of Liquidity, HTF POI (OB+FVG), IFVG,
+//     CISD, niveaux de session (ORH/ORL, Asie, Londres), PDH/PDL, EMA POI.
+//   • Le cockpit de décision : checklist 20 points, verdict GO/NO-GO,
+//     risque / RR / taille de position, lignes Entrée/SL/TP.
+//  Le moteur de décision strict est séparé des options d'affichage : masquer
+//  une zone, une ligne ou un label ne change jamais la validité d'un signal.
+//
+//  Moteur strict par défaut :
+//    Sweep externe -> CISD -> IFVG ou OB de déplacement -> retour à 50 %.
+//  Les confluences EMA200 / SMT / volume restent informatives et ne peuvent
+//  jamais créer seules un signal. Détection non-repainting sur bougies clôturées.
+//
+//  V2.4 — changements vs V2.3 H1 FIX :
+//   1) Deux PDH/PDL coexistaient : les LIGNES affichées (pdh/pdl) venaient de
+//      request.security(..., "D", ...), c.-à-d. la bougie journalière au sens
+//      de la session d'échange (utile mais pas forcément minuit New York pour
+//      un instrument qui trade quasi 24h) ; le SWEEP STRICT, lui, se basait
+//      sur corePdh/corePdl calculés en journée civile `sessTz` (00:00–24:00
+//      NY), ce qui est le repère PDH/PDL standard en ICT. Les deux pouvaient
+//      donc afficher un niveau différent de celui qui déclenche réellement le
+//      signal — trompeur pour lire le graphique. Le doublon est supprimé : la
+//      ligne PDH/PDL affichée est désormais dessinée à partir de corePdh/
+//      corePdl, donc ce qui est visible correspond toujours à ce que le
+//      moteur strict utilise pour détecter un sweep.
+//   2) Suppression du code mort qui ne contribue à aucun signal ni à la
+//      checklist affichée : eqh/eql/eqStr (EQH/EQL jamais montrées), inOb/
+//      poiOK/poiStr, obAlign/item10OK, htfPoiActive. Ces variables étaient
+//      calculées chaque bougie sans jamais alimenter goLong/goShort ni le
+//      tableau de bord — c'était du calcul perdu, et une source de confusion
+//      en pensant que la checklist 20 points les inclut alors qu'elles sont
+//      ignorées.
+//   3· Ligne "5· Premium/Discount" du tableau de bord : utilisait toujours
+//      autoEntryPx même quand useAutoPlan est désactivé (entrée manuelle),
+//      donnant un état Discount/Premium qui ne correspond pas au plan
+//      réellement utilisé par le reste de l'indicateur. Corrigé pour lire
+//      activeEntryPx.
+// =============================================================================
+
+indicator("ICT + Checklist Pré-Trade V2.4 [The5ers]", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// =============================================================================
+//  HELPERS
+// =============================================================================
+f_lineStyle(s) => s == "Plein" ? line.style_solid : s == "Tirets" ? line.style_dashed : line.style_dotted
+f_boxStyle(s)  => s == "Plein" ? line.style_solid : s == "Tirets" ? line.style_dashed : line.style_dotted
+f_size(s)      => s == "Minuscule" ? size.tiny : s == "Petit" ? size.small : s == "Normal" ? size.normal : s == "Grand" ? size.large : size.auto
+f_pos(p)       => p == "Haut gauche" ? position.top_left : p == "Bas droite" ? position.bottom_right : p == "Bas gauche" ? position.bottom_left : position.top_right
+f_px(x)        => na(x) ? "–" : str.tostring(x, format.mintick)
+
+confirmed = barstate.isconfirmed
+
+// =============================================================================
+//  INPUTS
+// =============================================================================
+gGen = "0 · Direction"
+dirMode = input.string("Auto (biais)", "Direction du trade", options = ["Auto (biais)", "Long", "Short"], group = gGen)
+enforceM5 = input.bool(true, "Bloquer les signaux hors M5", group = gGen)
+
+gBias = "1 · Biais structurel H1 / contexte H4"
+biasMode    = input.string("Structure H1 (V4)", "Méthode du biais", options = ["Structure H1 (V4)", "EMA HTF (legacy)"], group = gBias)
+h1Tf        = input.timeframe("60", "Timeframe structure principale", group = gBias)
+h1PivotLen  = input.int(2, "Pivot H1 gauche/droite", minval = 1, maxval = 10, group = gBias)
+h1RangeMode = input.string("BOS puis structure", "Range H1 si aucun BOS capturé", options = ["BOS puis structure", "BOS uniquement"], group = gBias)
+useH4Veto   = input.bool(false, "Bloquer si structure H4 opposée", group = gBias)
+h4Tf        = input.timeframe("240", "Timeframe contexte H4", group = gBias)
+h4PivotLen  = input.int(2, "Pivot H4 gauche/droite", minval = 1, maxval = 10, group = gBias)
+biasTf      = input.timeframe("240", "TF EMA legacy", group = gBias)
+biasEmaLen  = input.int(50, "EMA legacy", minval = 1, group = gBias)
+
+gSweep = "2 · Sweep of Liquidity"
+showSweep      = input.bool(true, "Activer le module", group = gSweep)
+seqSess        = input.session("0800-1600", "Fenêtre de formation NY", group = gSweep)
+sweepMaxAge    = input.int(36, "Âge max Sweep (bougies)", minval = 1, maxval = 200, group = gSweep)
+cisdMaxAge     = input.int(20, "Âge max CISD (bougies)", minval = 1, maxval = 200, group = gSweep)
+poiMaxAge      = input.int(36, "Validité du retour au POI", minval = 1, maxval = 200, group = gSweep)
+m15PivotLen    = input.int(2, "Pivot M15 de liquidité", minval = 1, maxval = 10, group = gSweep)
+usePdSweep     = input.bool(true, "Autoriser sweep PDH/PDL", group = gSweep)
+useAsiaSweep   = input.bool(true, "Autoriser sweep Asie", group = gSweep)
+useM15Sweep    = input.bool(true, "Autoriser sweep swing M15", group = gSweep)
+swingLen       = input.int(10, "Longueur des swings (pivot)", minval = 2, maxval = 100, group = gSweep)
+sweepMaxLevels = input.int(25, "Nombre max de niveaux suivis", minval = 5, maxval = 100, group = gSweep)
+sweepMaxDraw   = input.int(5, "Nombre max de sweeps affichés", minval = 1, maxval = 30, group = gSweep)
+sweepLabels    = input.bool(false, "Afficher le mot SWEEP", group = gSweep)
+sweepBuyCol    = input.color(color.new(#ef5350, 0), "Sweep buy-side (high balayé)", group = gSweep, inline = "sc")
+sweepSellCol   = input.color(color.new(#26a69a, 0), "Sweep sell-side (low balayé)", group = gSweep, inline = "sc")
+sweepStyle     = input.string("Pointillé", "Style de ligne", options = ["Plein", "Tirets", "Pointillé"], group = gSweep)
+sweepWidth     = input.int(1, "Épaisseur", minval = 1, maxval = 4, group = gSweep)
+sweepLblSize   = input.string("Petit", "Taille label", options = ["Auto", "Minuscule", "Petit", "Normal", "Grand"], group = gSweep)
+
+gPOI = "3 · POI strict + contexte HTF"
+showPOI    = input.bool(true, "Activer le module", group = gPOI)
+htf        = input.timeframe("60", "Timeframe supérieur (HTF)", group = gPOI)
+poiMode    = input.string("IFVG ou OB", "POI strict accepté", options = ["IFVG ou OB", "IFVG uniquement"], group = gPOI)
+bodyAtrMin = input.float(0.50, "Corps déplacement min. (ATR)", minval = 0.0, step = 0.05, group = gPOI)
+rangeAtrMin = input.float(1.20, "Range déplacement min. (ATR)", minval = 0.0, step = 0.05, group = gPOI)
+showHtfOB  = input.bool(true, "Afficher Order Blocks HTF", group = gPOI)
+showHtfFVG = input.bool(true, "Afficher FVG HTF", group = gPOI)
+poiMax     = input.int(4, "Nombre max de zones", minval = 1, maxval = 60, group = gPOI)
+poiFill    = input.bool(false, "Remplir les zones (sinon contour seul)", group = gPOI)
+obBullCol  = input.color(color.new(#2962ff, 82), "OB haussier", group = gPOI, inline = "ob")
+obBearCol  = input.color(color.new(#ff6d00, 82), "OB baissier", group = gPOI, inline = "ob")
+fvgBullCol = input.color(color.new(#00bcd4, 85), "FVG haussier", group = gPOI, inline = "fv")
+fvgBearCol = input.color(color.new(#e040fb, 85), "FVG baissier", group = gPOI, inline = "fv")
+poiBorder  = input.string("Tirets", "Bordure des zones", options = ["Plein", "Tirets", "Pointillé"], group = gPOI)
+poiLabels  = input.bool(false, "Étiquettes de zone", group = gPOI)
+
+gIFVG = "4 · IFVG (TF courant)"
+showIFVG    = input.bool(true, "Activer le module", group = gIFVG)
+showBaseFVG = input.bool(false, "Afficher aussi le FVG d'origine", group = gIFVG)
+zoneLabelStyle = input.string("Texte seul", "Style labels FVG / IFVG", options = ["Texte seul", "Bulle", "Masqué"], group = gIFVG)
+zoneLabelPos   = input.string("Centre", "Position du texte", options = ["Centre", "Bord droit"], group = gIFVG)
+zoneLabelSize  = input.string("Minuscule", "Taille du texte", options = ["Minuscule", "Petit", "Normal"], group = gIFVG)
+zoneShowDir    = input.bool(true, "Afficher le sens + / −", group = gIFVG)
+fvgMinTicks = input.float(0.0, "Taille min. du gap (prix, 0 = off)", minval = 0.0, group = gIFVG)
+fvgKeepAge  = input.int(60, "Âge max FVG pour inversion", minval = 3, maxval = 300, group = gIFVG)
+ifvgMax     = input.int(5, "Nombre max de FVG suivis", minval = 3, maxval = 60, group = gIFVG)
+baseBullCol = input.color(color.new(#26a69a, 88), "FVG haussier (origine)", group = gIFVG, inline = "b")
+baseBearCol = input.color(color.new(#ef5350, 88), "FVG baissier (origine)", group = gIFVG, inline = "b")
+invBullCol  = input.color(color.new(#26a69a, 55), "IFVG support", group = gIFVG, inline = "i")
+invBearCol  = input.color(color.new(#ef5350, 55), "IFVG résistance", group = gIFVG, inline = "i")
+
+gCISD = "5 · CISD"
+showCISD    = input.bool(true, "Activer le module", group = gCISD)
+cisdExtend  = input.int(15, "Extension de la ligne (bougies)", minval = 0, maxval = 200, group = gCISD)
+cisdMax     = input.int(3, "Nombre max de lignes CISD", minval = 2, maxval = 50, group = gCISD)
+cisdBullCol = input.color(color.new(#26a69a, 0), "CISD haussier", group = gCISD, inline = "c")
+cisdBearCol = input.color(color.new(#ef5350, 0), "CISD baissier", group = gCISD, inline = "c")
+cisdStyle   = input.string("Plein", "Style de ligne", options = ["Plein", "Tirets", "Pointillé"], group = gCISD)
+cisdWidth   = input.int(2, "Épaisseur", minval = 1, maxval = 4, group = gCISD)
+cisdLblSize = input.string("Petit", "Taille label", options = ["Auto", "Minuscule", "Petit", "Normal", "Grand"], group = gCISD)
+
+gStruct = "6 · Structure & POI courant"
+pivLen      = input.int(10, "Longueur des pivots (structure)", minval = 2, group = gStruct)
+recencyBars = input.int(20, "Fenêtre 'récent' (bougies)", minval = 3, maxval = 200, group = gStruct)
+smtManual   = input.bool(false, "SMT confirmé (manuel)", group = gStruct)
+smtAuto     = input.bool(false, "Calculer le SMT automatiquement", group = gStruct)
+smtSym      = input.symbol("SP:SPX", "Symbole corrélé (SMT)", group = gStruct)
+smtBullCol  = input.color(color.new(#26a69a, 0), "SMT haussier", group = gStruct, inline = "smt")
+smtBearCol  = input.color(color.new(#ef5350, 0), "SMT baissier", group = gStruct, inline = "smt")
+showEma     = input.bool(true, "Afficher EMA POI", group = gStruct)
+emaLen      = input.int(200, "Longueur EMA POI", minval = 1, group = gStruct)
+emaTolPct   = input.float(0.15, "Tolérance POI autour EMA (%)", minval = 0.0, step = 0.05, group = gStruct)
+eqTolTicks  = input.int(20, "Tolérance EQH/EQL (ticks)", minval = 1, group = gStruct)
+legLen      = input.int(50, "Longueur d'affichage range H1", minval = 5, group = gStruct)
+fibMode     = input.string("Ligne 50% seule", "Discount/Premium", options = ["Ligne 50% seule", "Zones + 50%", "Off"], group = gStruct)
+discCol     = input.color(color.new(#26a69a, 90), "Zone Discount", group = gStruct, inline = "z")
+premCol     = input.color(color.new(#ef5350, 90), "Zone Premium", group = gStruct, inline = "z")
+
+gSV = "6b · Affichage BOS / MSS"
+showBOS       = input.bool(true, "Afficher BOS structurel H1", group = gSV)
+bosBullCol    = input.color(color.new(#26a69a, 0), "BOS haussier", group = gSV, inline = "bos")
+bosBearCol    = input.color(color.new(#ef5350, 0), "BOS baissier", group = gSV, inline = "bos")
+showMSS       = input.bool(true, "Afficher MSS/CHOCH (TF courant)", group = gSV)
+mssLabelStyle = input.string("Texte sur ligne", "Style du label MSS", options = ["Texte sur ligne", "Bulle", "Masqué"], group = gSV)
+mssBullCol    = input.color(color.new(#2962ff, 0), "MSS haussier", group = gSV, inline = "mss")
+mssBearCol    = input.color(color.new(#ff6d00, 0), "MSS baissier", group = gSV, inline = "mss")
+svStyle       = input.string("Tirets", "Style des lignes", options = ["Plein", "Tirets", "Pointillé"], group = gSV)
+svWidth       = input.int(1, "Épaisseur", minval = 1, maxval = 4, group = gSV)
+svExt         = input.int(8, "Longueur des lignes (bougies)", minval = 1, maxval = 100, group = gSV)
+svMax         = input.int(3, "Nombre max affiché (chacun)", minval = 1, maxval = 20, group = gSV)
+svLabels      = input.bool(true, "Afficher les labels BOS/MSS", group = gSV)
+svLblSize     = input.string("Petit", "Taille label", options = ["Auto", "Minuscule", "Petit", "Normal", "Grand"], group = gSV)
+
+gLvl = "7 · Niveaux de session (OR/Asie/Londres/PDH-PDL)"
+sessTz     = input.string("America/New_York", "Fuseau des sessions", options = ["America/New_York", "Europe/London", "GMT", "Asia/Tokyo", "Europe/Zurich"], group = gLvl)
+lvlExtend  = input.int(30, "Extension des lignes (bougies)", minval = 0, maxval = 500, group = gLvl)
+lvlStyle   = input.string("Tirets", "Style des lignes", options = ["Plein", "Tirets", "Pointillé"], group = gLvl)
+lvlWidth   = input.int(1, "Épaisseur", minval = 1, maxval = 4, group = gLvl)
+lvlLblSize = input.string("Petit", "Taille labels", options = ["Auto", "Minuscule", "Petit", "Normal", "Grand"], group = gLvl)
+showOR   = input.bool(true, "Opening Range NY (ORH/ORL)", group = gLvl, inline = "or")
+orSess   = input.session("0930-1000", "", group = gLvl, inline = "or")
+orCol    = input.color(color.new(#ff9800, 0), "", group = gLvl, inline = "or")
+showAsia = input.bool(true, "Session Asie (High/Low)", group = gLvl, inline = "as")
+asiaSess = input.session("0000-0800", "", group = gLvl, inline = "as")
+asiaCol  = input.color(color.new(#ab47bc, 0), "", group = gLvl, inline = "as")
+showLon  = input.bool(true, "Session Londres (High/Low)", group = gLvl, inline = "lo")
+lonSess  = input.session("0200-0500", "", group = gLvl, inline = "lo")
+lonCol   = input.color(color.new(#42a5f5, 0), "", group = gLvl, inline = "lo")
+showPD   = input.bool(true, "PDH / PDL (veille)", group = gLvl, inline = "pd")
+pdhCol   = input.color(color.new(#26a69a, 0), "PDH", group = gLvl, inline = "pd")
+pdlCol   = input.color(color.new(#ef5350, 0), "PDL", group = gLvl, inline = "pd")
+
+gLiq = "7b · Lignes de liquidité actives"
+showChartLiq = input.bool(true, "Afficher BSL/SSL du TF courant", group = gLiq)
+showM15Liq   = input.bool(true, "Afficher BSL/SSL M15", group = gLiq)
+showPdLiq    = input.bool(false, "Dupliquer PDH/PDL comme liquidités", group = gLiq)
+showAsiaLiq  = input.bool(false, "Dupliquer Asie H/L comme liquidités", group = gLiq)
+liqLookback  = input.int(15, "Longueur à gauche", minval = 1, maxval = 300, group = gLiq)
+liqExtend    = input.int(35, "Extension à droite", minval = 1, maxval = 500, group = gLiq)
+liqStyle     = input.string("Pointillé", "Style des lignes", options = ["Plein", "Tirets", "Pointillé"], group = gLiq)
+liqWidth     = input.int(1, "Épaisseur", minval = 1, maxval = 4, group = gLiq)
+liqShowPrice = input.bool(false, "Afficher le prix dans le texte", group = gLiq)
+liqLblSize   = input.string("Petit", "Taille du texte", options = ["Minuscule", "Petit", "Normal"], group = gLiq)
+liqHighCol   = input.color(color.new(#ef5350, 5), "Liquidité au-dessus (BSL)", group = gLiq, inline = "liq")
+liqLowCol    = input.color(color.new(#26a69a, 5), "Liquidité en dessous (SSL)", group = gLiq, inline = "liq")
+
+gSessGate = "8 · Session de trading & News"
+nyTradeSess  = input.session("0935-1600", "Fenêtre d'entrée NY", group = gSessGate)
+flatSess     = input.session("1555-1600", "Clôture / annulation des plans", group = gSessGate)
+useLonGate   = input.bool(false, "Accepter aussi Londres", group = gSessGate)
+lonTradeSess = input.session("0200-0500", "Session Londres (trade)", group = gSessGate)
+newsOK       = input.bool(true, "News vérifiées (pas d'impact fort)", group = gSessGate)
+
+gVol = "9 · Volume"
+volLen  = input.int(20, "MA du volume", minval = 1, group = gVol)
+volMult = input.float(1.8, "Facteur de spike volume", minval = 1.0, step = 0.1, group = gVol)
+
+gRisk = "10 · Risk & Trade"
+useAutoPlan = input.bool(true, "Niveaux automatiques du plan strict", group = gRisk)
+capital     = input.float(5000, "Capital / equity ($)", minval = 0, group = gRisk)
+riskPct     = input.float(0.25, "Risque par trade (%)", minval = 0.01, maxval = 2.0, step = 0.05, group = gRisk)
+tickValue   = input.float(1.0, "Valeur du tick ($/tick/contrat)", minval = 0.0, step = 0.1, group = gRisk)
+entryPx     = input.float(0.0, "Entrée manuelle (si auto désactivé)", group = gRisk)
+slPx        = input.float(0.0, "SL manuel", group = gRisk)
+tp1Px       = input.float(0.0, "TP1 manuel", group = gRisk)
+tp2Px       = input.float(0.0, "TP2 manuel", group = gRisk)
+tp3Px       = input.float(0.0, "TP3 manuel", group = gRisk)
+tp1R        = input.float(1.50, "TP1 automatique (R)", minval = 0.50, step = 0.25, group = gRisk)
+minRR       = input.float(3.0, "RR minimum", minval = 0.0, step = 0.5, group = gRisk)
+minStopAtr  = input.float(0.50, "Distance SL minimum (ATR)", minval = 0.0, step = 0.05, group = gRisk)
+slBufTicks  = input.int(2, "Buffer derrière le sweep (ticks)", minval = 0, group = gRisk)
+autoTradeCount = input.bool(true, "Compter automatiquement les signaux", group = gRisk)
+tradesToday = input.int(0, "Nb de trades aujourd'hui", minval = 0, group = gRisk)
+maxTrades   = input.int(2, "Max trades / jour", minval = 1, maxval = 5, group = gRisk)
+dailyLossPct = input.float(0.0, "Perte du jour actuelle (%)", minval = 0.0, step = 0.1, group = gRisk)
+dailyLossCap = input.float(1.50, "Coupe-circuit journalier (%)", minval = 0.1, step = 0.1, group = gRisk)
+totalDdPct   = input.float(0.0, "Drawdown total actuel (%)", minval = 0.0, step = 0.1, group = gRisk)
+totalDdCap   = input.float(8.0, "Coupe-circuit drawdown total (%)", minval = 0.5, step = 0.5, group = gRisk)
+
+gDash = "11 · Tableau de bord"
+showDash  = input.bool(true, "Afficher le tableau de bord", group = gDash)
+dashPos   = input.string("Haut droite", "Position", options = ["Haut droite", "Haut gauche", "Bas droite", "Bas gauche"], group = gDash)
+dashSize  = input.string("Petit", "Taille du texte", options = ["Minuscule", "Petit", "Normal"], group = gDash)
+useOptionalGate = input.bool(false, "Rendre les confluences optionnelles bloquantes", group = gDash)
+minOptionalConf = input.int(0, "Minimum optionnel (EMA/SMT/volume/HTF POI)", minval = 0, maxval = 4, group = gDash)
+showStageLabels = input.bool(true, "Afficher les étapes Sweep/CISD/POI/GO", group = gDash)
+stageLabelStyle = input.string("Texte seul", "Style des étapes 1/2/3", options = ["Texte seul", "Bulle", "Masqué"], group = gDash)
+showTrade = input.bool(true, "Tracer Entrée / SL / TP", group = gDash)
+lineExt   = input.int(30, "Extension lignes trade (bougies)", minval = 0, group = gDash)
+dashBg    = input.color(color.new(#0b1220, 8), "Fond du tableau", group = gDash, inline = "dc")
+dashTxt   = input.color(color.white, "Texte du tableau", group = gDash, inline = "dc")
+dashHdr   = input.color(color.new(#2962ff, 15), "Fond de l'en-tête", group = gDash)
+
+// =============================================================================
+//  FONCTION — ligne horizontale gérée (Entrée / SL / TP)
+// =============================================================================
+f_hline(_show, _price, _col, _txt, _style) =>
+    var line  ln = na
+    var label lb = na
+    keep = _show and _price > 0
+    if barstate.islast
+        if keep
+            if na(ln)
+                ln := line.new(bar_index - lineExt, _price, bar_index + lineExt, _price, xloc = xloc.bar_index, color = _col, style = _style, width = 1)
+                lb := label.new(bar_index + lineExt, _price, _txt, style = label.style_label_left, color = color.new(_col, 85), textcolor = _col, size = size.small)
+            line.set_xy1(ln, bar_index - lineExt, _price)
+            line.set_xy2(ln, bar_index + lineExt, _price)
+            label.set_xy(lb, bar_index + lineExt, _price)
+            label.set_text(lb, _txt + "  " + f_px(_price))
+        else if not na(ln)
+            line.delete(ln)
+            label.delete(lb)
+            ln := na
+            lb := na
+    int(na)
+
+// Ligne de liquidité active : texte sans fond, fixé au prolongement droit.
+f_liqLine(_show, _price, _col, _txt) =>
+    var line ln = na
+    var label lb = na
+    keep = _show and not na(_price)
+    if barstate.islast
+        if keep
+            leftX = math.max(0, bar_index - liqLookback)
+            if na(ln)
+                ln := line.new(leftX, _price, bar_index + liqExtend, _price, xloc = xloc.bar_index, color = _col, style = f_lineStyle(liqStyle), width = liqWidth)
+                lb := label.new(bar_index + liqExtend, _price, "", xloc = xloc.bar_index, style = label.style_none, color = color.new(_col, 100), textcolor = _col, size = f_size(liqLblSize))
+            line.set_xy1(ln, leftX, _price)
+            line.set_xy2(ln, bar_index + liqExtend, _price)
+            line.set_color(ln, _col)
+            line.set_style(ln, f_lineStyle(liqStyle))
+            line.set_width(ln, liqWidth)
+            label.set_xy(lb, bar_index + liqExtend, _price)
+            label.set_style(lb, label.style_none)
+            label.set_textcolor(lb, _col)
+            label.set_size(lb, f_size(liqLblSize))
+            label.set_text(lb, _txt + (liqShowPrice ? "  " + f_px(_price) : ""))
+        else if not na(ln)
+            line.delete(ln)
+            label.delete(lb)
+            ln := na
+            lb := na
+    int(na)
+
+f_stageText(_price, _txt, _up, _col) =>
+    if showStageLabels and stageLabelStyle != "Masqué"
+        textOnly = stageLabelStyle == "Texte seul"
+        label.new(bar_index, _price, _txt, style = textOnly ? label.style_none : _up ? label.style_label_up : label.style_label_down, color = textOnly ? color.new(_col, 100) : color.new(_col, 72), textcolor = _col, size = size.tiny)
+    int(na)
+
+// Marqueur de structure (BOS / MSS) : ligne au niveau cassé + label, plafonné
+var array<line>  bosLines = array.new<line>()
+var array<label> bosLabs  = array.new<label>()
+var array<line>  mssLines = array.new<line>()
+var array<label> mssLabs  = array.new<label>()
+
+f_structMark(_lines, _labs, _lvl, _col, _txt, _up, _max, _labelStyle) =>
+    ln = line.new(bar_index - svExt, _lvl, bar_index + svExt, _lvl, xloc = xloc.bar_index, color = _col, style = f_lineStyle(svStyle), width = svWidth)
+    array.push(_lines, ln)
+    if array.size(_lines) > _max
+        line.delete(array.shift(_lines))
+    if svLabels and _labelStyle != "Masqué"
+        textOnly = _labelStyle == "Texte sur ligne"
+        lb = label.new(bar_index, _lvl, _txt, style = textOnly ? label.style_none : _up ? label.style_label_up : label.style_label_down, color = textOnly ? color.new(_col, 100) : color.new(_col, 80), textcolor = _col, size = f_size(svLblSize))
+        array.push(_labs, lb)
+        if array.size(_labs) > _max
+            label.delete(array.shift(_labs))
+    int(na)
+
+// =============================================================================
+//  HELPERS DU MOTEUR STRICT
+// =============================================================================
+f_coreStructure(int len, bool allowStructureFallback) =>
+    float phCore = ta.pivothigh(len, len)
+    float plCore = ta.pivotlow(len, len)
+    var float lastPhCore = na
+    var float prevPhCore = na
+    var float lastPlCore = na
+    var float prevPlCore = na
+    var int persistentBiasCore = 0
+    var int lastPhIdCore = na
+    var int lastPlIdCore = na
+    var int brokenPhIdCore = na
+    var int brokenPlIdCore = na
+    var float dealingLowCore = na
+    var float dealingHighCore = na
+    var int dealingDirCore = 0
+    var int bosSerialCore = 0
+    var int rangeSourceCore = 0  // 0 = aucune, 1 = jambe structurelle, 2 = cassure confirmée
+    if not na(phCore)
+        prevPhCore := lastPhCore
+        lastPhCore := phCore
+        lastPhIdCore := bar_index - len
+    if not na(plCore)
+        prevPlCore := lastPlCore
+        lastPlCore := plCore
+        lastPlIdCore := bar_index - len
+    bool enoughCore = not na(prevPhCore) and not na(prevPlCore)
+    int biasBeforeCore = persistentBiasCore
+    if enoughCore and lastPhCore > prevPhCore and lastPlCore > prevPlCore
+        persistentBiasCore := 1
+    else if enoughCore and lastPhCore < prevPhCore and lastPlCore < prevPlCore
+        persistentBiasCore := -1
+    bool biasChangedCore = persistentBiasCore != biasBeforeCore
+
+    // Une cassure doit être mémorisée au moment où elle arrive, même si la
+    // structure HH/HL ou LH/LL n'est confirmée que quelques bougies plus tard.
+    // L'ancienne dépendance au biais faisait perdre définitivement ce BOS.
+    bool bullBreakCore = not na(lastPhIdCore) and lastPhIdCore != brokenPhIdCore and not na(lastPlCore) and close > lastPhCore
+    bool bearBreakCore = not na(lastPlIdCore) and lastPlIdCore != brokenPlIdCore and not na(lastPhCore) and close < lastPlCore
+    if bullBreakCore
+        dealingLowCore := math.min(lastPlCore, low)
+        dealingHighCore := high
+        dealingDirCore := 1
+        rangeSourceCore := 2
+        brokenPhIdCore := lastPhIdCore
+        bosSerialCore += 1
+    else if bearBreakCore
+        dealingLowCore := low
+        dealingHighCore := math.max(lastPhCore, high)
+        dealingDirCore := -1
+        rangeSourceCore := 2
+        brokenPlIdCore := lastPlIdCore
+        bosSerialCore += 1
+    else if allowStructureFallback and enoughCore and persistentBiasCore != 0 and (biasChangedCore or dealingDirCore != persistentBiasCore or na(dealingLowCore) or na(dealingHighCore))
+        // Secours non-repaint : si l'historique chargé commence après la
+        // cassure, la dernière jambe entre pivots H1 confirmés reste exploitable.
+        dealingLowCore := math.min(lastPlCore, lastPhCore)
+        dealingHighCore := math.max(lastPlCore, lastPhCore)
+        dealingDirCore := persistentBiasCore
+        rangeSourceCore := 1
+    else if dealingDirCore == 1 and not na(dealingHighCore)
+        dealingHighCore := math.max(dealingHighCore, high)
+    else if dealingDirCore == -1 and not na(dealingLowCore)
+        dealingLowCore := math.min(dealingLowCore, low)
+    [persistentBiasCore, dealingLowCore, dealingHighCore, dealingDirCore, bosSerialCore, rangeSourceCore]
+
+// Les valeurs HTF sont décalées d'une bougie et demandées avec lookahead_on.
+// TradingView recommande cette combinaison pour ne lire que les bougies HTF
+// clôturées et éviter qu'une range H1 change pendant l'heure en cours.
+f_coreStructureConfirmed(int len, bool allowStructureFallback) =>
+    [biasCore, lowCore, highCore, dirCore, serialCore, sourceCore] = f_coreStructure(len, allowStructureFallback)
+    [biasCore[1], lowCore[1], highCore[1], dirCore[1], serialCore[1], sourceCore[1]]
+
+f_coreLastSwings(int len) =>
+    float phCore = ta.pivothigh(len, len)
+    float plCore = ta.pivotlow(len, len)
+    var float lastPhCore = na
+    var float lastPlCore = na
+    if not na(phCore)
+        lastPhCore := phCore
+    if not na(plCore)
+        lastPlCore := plCore
+    [lastPhCore, lastPlCore]
+
+f_coreLastSwingsConfirmed(int len) =>
+    [lastHighCore, lastLowCore] = f_coreLastSwings(len)
+    [lastHighCore[1], lastLowCore[1]]
+
+f_closestAbove(float entry, float stop, float minimumR, float a, float b, float c, float d) =>
+    float risk = entry - stop
+    float threshold = entry + minimumR * risk
+    float result = na
+    if risk > 0
+        if not na(a) and a >= threshold
+            result := a
+        if not na(b) and b >= threshold and (na(result) or b < result)
+            result := b
+        if not na(c) and c >= threshold and (na(result) or c < result)
+            result := c
+        if not na(d) and d >= threshold and (na(result) or d < result)
+            result := d
+    result
+
+f_closestBelow(float entry, float stop, float minimumR, float a, float b, float c, float d) =>
+    float risk = stop - entry
+    float threshold = entry - minimumR * risk
+    float result = na
+    if risk > 0
+        if not na(a) and a <= threshold
+            result := a
+        if not na(b) and b <= threshold and (na(result) or b > result)
+            result := b
+        if not na(c) and c <= threshold and (na(result) or c > result)
+            result := c
+        if not na(d) and d <= threshold and (na(result) or d > result)
+            result := d
+    result
+
+// =============================================================================
+//  1 · BIAIS H1 PERSISTANT + RANGE STRUCTURELLE ACTIVE
+// =============================================================================
+htfEmaNow  = request.security(syminfo.tickerid, biasTf, ta.ema(close, biasEmaLen),    lookahead = barmerge.lookahead_off)
+htfEmaPrev = request.security(syminfo.tickerid, biasTf, ta.ema(close, biasEmaLen)[1], lookahead = barmerge.lookahead_off)
+htfClose   = request.security(syminfo.tickerid, biasTf, close,                        lookahead = barmerge.lookahead_off)
+
+h1AllowFallback = h1RangeMode == "BOS puis structure"
+[h1Bias, h1DealingLowRaw, h1DealingHighRaw, h1DealingDir, h1BosSerial, h1RangeSource] = request.security(syminfo.tickerid, h1Tf, f_coreStructureConfirmed(h1PivotLen, h1AllowFallback), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+[h4Bias, _h4DealingLow, _h4DealingHigh, _h4DealingDir, _h4BosSerial, _h4RangeSource] = request.security(syminfo.tickerid, h4Tf, f_coreStructureConfirmed(h4PivotLen, false), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+[m15SwingHigh, m15SwingLow] = request.security(syminfo.tickerid, "15", f_coreLastSwingsConfirmed(m15PivotLen), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+h1RangeAligned = h1Bias != 0 and h1DealingDir == h1Bias
+h1RangeLow  = h1RangeAligned ? math.min(h1DealingLowRaw, h1DealingHighRaw) : na
+h1RangeHigh = h1RangeAligned ? math.max(h1DealingLowRaw, h1DealingHighRaw) : na
+h1Mid       = (h1RangeLow + h1RangeHigh) / 2.0
+h1RangeSourceStr = h1RangeSource == 2 ? "Cassure H1" : h1RangeSource == 1 ? "Structure confirmée" : "En attente"
+
+emaBias  = htfClose > htfEmaNow and htfEmaNow >= htfEmaPrev ? 1 : htfClose < htfEmaNow and htfEmaNow <= htfEmaPrev ? -1 : 0
+biasAuto = biasMode == "Structure H1 (V4)" ? h1Bias : emaBias
+bias     = biasAuto
+allowLongDir  = dirMode != "Short"
+allowShortDir = dirMode != "Long"
+biasStr  = bias == 1 ? "Long HH/HL" : bias == -1 ? "Short LH/LL" : "Neutre"
+h4VetoOK = not useH4Veto or (bias == 1 ? h4Bias != -1 : bias == -1 ? h4Bias != 1 : false)
+
+bool bosBullEvt = confirmed and ta.change(h1BosSerial) != 0 and h1DealingDir == 1
+bool bosBearEvt = confirmed and ta.change(h1BosSerial) != 0 and h1DealingDir == -1
+if showBOS and bosBullEvt and not na(h1DealingHighRaw)
+    f_structMark(bosLines, bosLabs, h1DealingHighRaw, bosBullCol, h1DealingDir == h1Bias ? "BOS H1" : "MSS H1", true, svMax, "Bulle")
+if showBOS and bosBearEvt and not na(h1DealingLowRaw)
+    f_structMark(bosLines, bosLabs, h1DealingLowRaw, bosBearCol, h1DealingDir == h1Bias ? "BOS H1" : "MSS H1", false, svMax, "Bulle")
+
+// =============================================================================
+//  PIVOTS STRUCTURE (MSS / EQH-EQL)  — longueur pivLen
+// =============================================================================
+ph = ta.pivothigh(pivLen, pivLen)
+pl = ta.pivotlow(pivLen, pivLen)
+var float lastPH = na
+var float lastPL = na
+var float ph1 = na
+var float ph2 = na
+var float pl1 = na
+var float pl2 = na
+if not na(ph)
+    lastPH := ph
+    ph2 := ph1
+    ph1 := ph
+if not na(pl)
+    lastPL := pl
+    pl2 := pl1
+    pl1 := pl
+
+// =============================================================================
+//  SMT (divergence via actif corrélé, ex. SP500)
+// =============================================================================
+// Si désactivé, on requête son propre symbole (toujours valide) pour éviter une erreur.
+smtTicker = smtAuto ? smtSym : syminfo.tickerid
+[cmpHigh, cmpLow] = request.security(smtTicker, timeframe.period, [high, low], lookahead = barmerge.lookahead_off)
+
+var float lastPHprice = na
+var float lastPHcmp   = na
+var float lastPLprice = na
+var float lastPLcmp   = na
+var int   lastSmtBar  = na
+var int   lastSmtDir  = 0
+bool smtBearEvt = false
+bool smtBullEvt = false
+
+if smtAuto and not na(ph)
+    curCmpHigh = cmpHigh[pivLen]
+    if not na(lastPHprice) and not na(curCmpHigh) and ph > lastPHprice and curCmpHigh < lastPHcmp
+        smtBearEvt := true
+        lastSmtBar := bar_index
+        lastSmtDir := -1
+    lastPHprice := ph
+    lastPHcmp := curCmpHigh
+if smtAuto and not na(pl)
+    curCmpLow = cmpLow[pivLen]
+    if not na(lastPLprice) and not na(curCmpLow) and pl < lastPLprice and curCmpLow > lastPLcmp
+        smtBullEvt := true
+        lastSmtBar := bar_index
+        lastSmtDir := 1
+    lastPLprice := pl
+    lastPLcmp := curCmpLow
+
+if smtBearEvt
+    f_structMark(mssLines, mssLabs, ph, smtBearCol, "SMT", true, svMax, mssLabelStyle)
+if smtBullEvt
+    f_structMark(mssLines, mssLabs, pl, smtBullCol, "SMT", false, svMax, mssLabelStyle)
+smtRecent = not na(lastSmtBar) and (bar_index - lastSmtBar) <= recencyBars
+
+
+// =============================================================================
+//  MODULE · SWEEP OF LIQUIDITY  (pivots swingLen)
+// =============================================================================
+var array<float> hLvl = array.new_float()
+var array<int>   hBar = array.new_int()
+var array<float> lLvl = array.new_float()
+var array<int>   lBar = array.new_int()
+var int  lastSweepBar = na
+var int  sweepSide     = 0
+var bool sweepBuyEvt   = false
+var bool sweepSellEvt  = false
+sweepBuyEvt  := false
+sweepSellEvt := false
+var array<line>  swLines = array.new<line>()
+var array<label> swLabs  = array.new<label>()
+
+f_drawSweep(_x1, _lvl, _col, _down) =>
+    ln = line.new(_x1, _lvl, bar_index, _lvl, xloc = xloc.bar_index, color = _col, style = f_lineStyle(sweepStyle), width = sweepWidth)
+    array.push(swLines, ln)
+    if array.size(swLines) > sweepMaxDraw
+        line.delete(array.shift(swLines))
+    if sweepLabels
+        lb = label.new(bar_index, _lvl, "SWEEP", style = _down ? label.style_label_down : label.style_label_up, color = color.new(_col, 82), textcolor = _col, size = f_size(sweepLblSize))
+        array.push(swLabs, lb)
+        if array.size(swLabs) > sweepMaxDraw
+            label.delete(array.shift(swLabs))
+    int(na)
+
+sph = ta.pivothigh(swingLen, swingLen)
+spl = ta.pivotlow(swingLen, swingLen)
+if not na(sph)
+    array.push(hLvl, sph)
+    array.push(hBar, bar_index - swingLen)
+    if array.size(hLvl) > sweepMaxLevels
+        array.shift(hLvl), array.shift(hBar)
+if not na(spl)
+    array.push(lLvl, spl)
+    array.push(lBar, bar_index - swingLen)
+    if array.size(lLvl) > sweepMaxLevels
+        array.shift(lLvl), array.shift(lBar)
+
+// Les niveaux sont consommés même si le dessin des sweeps est masqué. Cela
+// permet aux lignes BSL/SSL d'afficher uniquement la liquidité encore active.
+if confirmed
+    i = 0
+    while i < array.size(hLvl)
+        lvl = array.get(hLvl, i)
+        if high > lvl
+            if close < lvl
+                if showSweep
+                    f_drawSweep(array.get(hBar, i), lvl, sweepBuyCol, true)
+                sweepBuyEvt := true
+                lastSweepBar := bar_index
+                sweepSide := 1
+            array.remove(hLvl, i), array.remove(hBar, i)
+        else
+            i += 1
+    j = 0
+    while j < array.size(lLvl)
+        lvl = array.get(lLvl, j)
+        if low < lvl
+            if close > lvl
+                if showSweep
+                    f_drawSweep(array.get(lBar, j), lvl, sweepSellCol, false)
+                sweepSellEvt := true
+                lastSweepBar := bar_index
+                sweepSide := -1
+            array.remove(lLvl, j), array.remove(lBar, j)
+        else
+            j += 1
+sweepRecent = not na(lastSweepBar) and (bar_index - lastSweepBar) <= recencyBars
+
+// =============================================================================
+//  MODULE · HTF POI (Order Blocks + FVG)
+// =============================================================================
+f_htf() =>
+    bfvg = low[1]  > high[3]
+    sfvg = high[1] < low[3]
+    fTop = bfvg ? low[1]  : sfvg ? low[3]  : na
+    fBot = bfvg ? high[3] : sfvg ? high[1] : na
+    fDir = bfvg ? 1 : sfvg ? -1 : 0
+    fAnc = time[3]
+    bob = close[1] > open[1] and close[1] > high[2] and close[2] < open[2]
+    sob = close[1] < open[1] and close[1] < low[2]  and close[2] > open[2]
+    oTop = (bob or sob) ? high[2] : na
+    oBot = (bob or sob) ? low[2]  : na
+    oDir = bob ? 1 : sob ? -1 : 0
+    oAnc = time[2]
+    [fTop, fBot, fDir, bfvg or sfvg, fAnc, oTop, oBot, oDir, bob or sob, oAnc]
+
+[hfTop, hfBot, hfDir, hfNew, hfAnc, hoTop, hoBot, hoDir, hoNew, hoAnc] = request.security(syminfo.tickerid, htf, f_htf(), lookahead = barmerge.lookahead_off)
+htfNewBar = ta.change(time(htf)) != 0
+var array<box> poiBoxes = array.new<box>()
+var float lastHtfFvgTop = na
+var float lastHtfFvgBot = na
+var float lastHtfObTop = na
+var float lastHtfObBot = na
+if htfNewBar
+    if hfNew and hfDir != 0
+        lastHtfFvgTop := hfTop
+        lastHtfFvgBot := hfBot
+    if hoNew and hoDir != 0
+        lastHtfObTop := hoTop
+        lastHtfObBot := hoBot
+
+f_pushPOI(_top, _bot, _anchor, _col, _txt) =>
+    b = box.new(left = _anchor, top = _top, right = time, bottom = _bot, xloc = xloc.bar_time, border_color = color.new(_col, poiFill ? 20 : 0), border_style = f_boxStyle(poiBorder), bgcolor = poiFill ? _col : color.new(_col, 100))
+    if poiLabels
+        box.set_text(b, _txt)
+        box.set_text_halign(b, text.align_left)
+        box.set_text_valign(b, text.align_top)
+        box.set_text_color(b, color.new(_col, 0))
+        box.set_text_size(b, size.small)
+    array.push(poiBoxes, b)
+    if array.size(poiBoxes) > poiMax
+        box.delete(array.shift(poiBoxes))
+
+if showPOI and htfNewBar
+    if showHtfFVG and hfNew and hfDir != 0
+        f_pushPOI(hfTop, hfBot, hfAnc, hfDir == 1 ? fvgBullCol : fvgBearCol, hfDir == 1 ? "HTF FVG +" : "HTF FVG −")
+    if showHtfOB and hoNew and hoDir != 0
+        f_pushPOI(hoTop, hoBot, hoAnc, hoDir == 1 ? obBullCol : obBearCol, hoDir == 1 ? "HTF OB +" : "HTF OB −")
+
+if showPOI and barstate.islast and array.size(poiBoxes) > 0
+    for bi = 0 to array.size(poiBoxes) - 1
+        box.set_right(array.get(poiBoxes, bi), time)
+
+htfPoiContext = (not na(lastHtfFvgTop) and close <= math.max(lastHtfFvgTop, lastHtfFvgBot) and close >= math.min(lastHtfFvgTop, lastHtfFvgBot)) or (not na(lastHtfObTop) and close <= math.max(lastHtfObTop, lastHtfObBot) and close >= math.min(lastHtfObTop, lastHtfObBot))
+
+// =============================================================================
+//  MODULE · IFVG (TF courant)  — alimente aussi POI(#6), IFVG(#9), OB-align(#10)
+// =============================================================================
+var array<box>   fBoxes = array.new<box>()
+var array<label> fLabs  = array.new<label>()
+var array<int>   fState = array.new_int()
+var bool  ifvgEvt = false
+ifvgEvt := false
+var float lastIfvgTop = na
+var float lastIfvgBot = na
+var int   lastIfvgDir = 0
+
+f_addFVG(_top, _bot, _dir) =>
+    col = _dir == 1 ? baseBullCol : baseBearCol
+    b = box.new(bar_index - 2, _top, bar_index, _bot, xloc = xloc.bar_index, border_color = color.new(col, 40), border_style = line.style_dotted, bgcolor = col)
+    textOnly = zoneLabelStyle == "Texte seul"
+    hidden = zoneLabelStyle == "Masqué"
+    zoneText = hidden ? "" : zoneShowDir ? (_dir == 1 ? "FVG +" : "FVG −") : "FVG"
+    zoneStyle = textOnly or hidden ? label.style_none : _dir == 1 ? label.style_label_up : label.style_label_down
+    zoneColor = textOnly or hidden ? color.new(col, 100) : color.new(col, 60)
+    zoneTextColor = hidden ? color.new(col, 100) : color.new(_dir == 1 ? baseBullCol : baseBearCol, 0)
+    lb = label.new(bar_index, (_top + _bot) / 2.0, zoneText, style = zoneStyle, color = zoneColor, textcolor = zoneTextColor, size = f_size(zoneLabelSize))
+    array.push(fBoxes, b), array.push(fLabs, lb), array.push(fState, _dir)
+    if array.size(fBoxes) > ifvgMax
+        box.delete(array.shift(fBoxes)), label.delete(array.shift(fLabs)), array.shift(fState)
+
+if (showIFVG or showBaseFVG) and confirmed
+    bull = low > high[2]
+    bear = high < low[2]
+    gap  = bull ? low - high[2] : bear ? low[2] - high : 0.0
+    if (bull or bear) and gap >= fvgMinTicks
+        f_addFVG(bull ? low : low[2], bull ? high[2] : high, bull ? 1 : -1)
+    k = 0
+    while k < array.size(fBoxes)
+        st = array.get(fState, k)
+        b  = array.get(fBoxes, k)
+        lb = array.get(fLabs, k)
+        top = box.get_top(b)
+        bot = box.get_bottom(b)
+        invertedNow = false
+        if st == 1 and close < bot
+            box.set_bgcolor(b, showIFVG ? invBearCol : color.new(invBearCol, 100))
+            box.set_border_color(b, showIFVG ? color.new(invBearCol, 10) : color.new(invBearCol, 100))
+            box.set_border_style(b, line.style_solid)
+            label.set_text(lb, showIFVG and zoneLabelStyle != "Masqué" ? (zoneShowDir ? "IFVG −" : "IFVG") : "")
+            label.set_textcolor(lb, showIFVG and zoneLabelStyle != "Masqué" ? color.new(invBearCol, 0) : color.new(invBearCol, 100))
+            label.set_color(lb, zoneLabelStyle == "Bulle" and showIFVG ? color.new(invBearCol, 65) : color.new(invBearCol, 100))
+            label.set_style(lb, zoneLabelStyle == "Bulle" ? label.style_label_down : label.style_none)
+            label.set_size(lb, f_size(zoneLabelSize))
+            label.set_y(lb, (top + bot) / 2.0)
+            array.set(fState, k, 2)
+            invertedNow := true
+            ifvgEvt := true
+            lastIfvgTop := top
+            lastIfvgBot := bot
+            lastIfvgDir := -1
+        else if st == -1 and close > top
+            box.set_bgcolor(b, showIFVG ? invBullCol : color.new(invBullCol, 100))
+            box.set_border_color(b, showIFVG ? color.new(invBullCol, 10) : color.new(invBullCol, 100))
+            box.set_border_style(b, line.style_solid)
+            label.set_text(lb, showIFVG and zoneLabelStyle != "Masqué" ? (zoneShowDir ? "IFVG +" : "IFVG") : "")
+            label.set_textcolor(lb, showIFVG and zoneLabelStyle != "Masqué" ? color.new(invBullCol, 0) : color.new(invBullCol, 100))
+            label.set_color(lb, zoneLabelStyle == "Bulle" and showIFVG ? color.new(invBullCol, 65) : color.new(invBullCol, 100))
+            label.set_style(lb, zoneLabelStyle == "Bulle" ? label.style_label_up : label.style_none)
+            label.set_size(lb, f_size(zoneLabelSize))
+            label.set_y(lb, (top + bot) / 2.0)
+            array.set(fState, k, 2)
+            invertedNow := true
+            ifvgEvt := true
+            lastIfvgTop := top
+            lastIfvgBot := bot
+            lastIfvgDir := 1
+        if not showBaseFVG and not invertedNow and (st == 1 or st == -1)
+            box.set_bgcolor(b, color.new(color.gray, 100))
+            box.set_border_color(b, color.new(color.gray, 100))
+            label.set_color(lb, color.new(color.gray, 100))
+            label.set_textcolor(lb, color.new(color.gray, 100))
+        k += 1
+
+if (showIFVG or showBaseFVG) and barstate.islast and array.size(fBoxes) > 0
+    for bi = 0 to array.size(fBoxes) - 1
+        activeBox = array.get(fBoxes, bi)
+        activeLabel = array.get(fLabs, bi)
+        box.set_right(activeBox, bar_index)
+        labelX = zoneLabelPos == "Centre" ? int(math.round((box.get_left(activeBox) + bar_index) / 2.0)) : bar_index
+        label.set_x(activeLabel, labelX)
+        label.set_y(activeLabel, (box.get_top(activeBox) + box.get_bottom(activeBox)) / 2.0)
+
+fvgActive  = false
+ifvgActive = false
+if array.size(fBoxes) > 0
+    for bi = 0 to array.size(fBoxes) - 1
+        st2 = array.get(fState, bi)
+        bb  = array.get(fBoxes, bi)
+        inside = close <= box.get_top(bb) and close >= box.get_bottom(bb)
+        if inside and (st2 == 1 or st2 == -1)
+            fvgActive := true
+        if inside and st2 == 2
+            ifvgActive := true
+
+ifMid  = lastIfvgDir != 0 ? (lastIfvgTop + lastIfvgBot) / 2.0 : na
+ifvgOK = ifvgActive
+
+// =============================================================================
+//  MODULE · CISD  — alimente Structure(#8)
+// =============================================================================
+var int   curDir       = 0
+var float runFirstOpen = na
+var int   runStartBar  = na
+var int   lastCisdBar  = na
+var int   lastCisdDir  = 0
+var array<line>  cisdLines = array.new<line>()
+var array<label> cisdLabs  = array.new<label>()
+var bool cisdBullEvt = false
+var bool cisdBearEvt = false
+cisdBullEvt := false
+cisdBearEvt := false
+
+f_pushCISD(_lvl, _x1, _bull) =>
+    col = _bull ? cisdBullCol : cisdBearCol
+    ln = line.new(_x1, _lvl, bar_index + cisdExtend, _lvl, xloc = xloc.bar_index, color = col, style = f_lineStyle(cisdStyle), width = cisdWidth)
+    lb = label.new(bar_index + cisdExtend, _lvl, "CISD", style = label.style_label_left, color = color.new(col, 85), textcolor = col, size = f_size(cisdLblSize))
+    array.push(cisdLines, ln), array.push(cisdLabs, lb)
+    if array.size(cisdLines) > cisdMax
+        line.delete(array.shift(cisdLines)), label.delete(array.shift(cisdLabs))
+
+if showCISD and confirmed
+    thisDir = close > open ? 1 : close < open ? -1 : curDir
+    if thisDir != curDir and thisDir != 0
+        if thisDir == 1 and curDir == -1 and not na(runFirstOpen) and close > runFirstOpen
+            f_pushCISD(runFirstOpen, runStartBar, true)
+            cisdBullEvt := true
+            lastCisdBar := bar_index
+            lastCisdDir := 1
+        else if thisDir == -1 and curDir == 1 and not na(runFirstOpen) and close < runFirstOpen
+            f_pushCISD(runFirstOpen, runStartBar, false)
+            cisdBearEvt := true
+            lastCisdBar := bar_index
+            lastCisdDir := -1
+        curDir       := thisDir
+        runFirstOpen := open
+        runStartBar  := bar_index
+
+// =============================================================================
+//  MSS / CHOCH  +  STRUCTURE
+// =============================================================================
+var int mssDir = 0
+var int mssBar = na
+var float mssBrokenHigh = na
+var float mssBrokenLow  = na
+bool mssBullEvt = false
+bool mssBearEvt = false
+if confirmed and not na(lastPH) and close > lastPH and (na(mssBrokenHigh) or lastPH != mssBrokenHigh)
+    mssDir := 1
+    mssBar := bar_index
+    mssBullEvt := true
+    mssBrokenHigh := lastPH
+if confirmed and not na(lastPL) and close < lastPL and (na(mssBrokenLow) or lastPL != mssBrokenLow)
+    mssDir := -1
+    mssBar := bar_index
+    mssBearEvt := true
+    mssBrokenLow := lastPL
+if showMSS and mssBullEvt
+    f_structMark(mssLines, mssLabs, lastPH, mssBullCol, "MSS", true, svMax, mssLabelStyle)
+if showMSS and mssBearEvt
+    f_structMark(mssLines, mssLabs, lastPL, mssBearCol, "MSS", false, svMax, mssLabelStyle)
+
+// =============================================================================
+//  EMA POI + VOLUME
+// =============================================================================
+emaPoi = ta.ema(close, emaLen)
+plot(showEma ? emaPoi : na, "EMA POI", color = color.new(color.orange, 0), linewidth = 2)
+
+nearEma = math.abs(close - emaPoi) <= emaPoi * emaTolPct / 100.0
+
+volMa = ta.sma(volume, volLen)
+var int lastVolBar = na
+if confirmed and volume > volMa * volMult
+    lastVolBar := bar_index
+volOK = not na(lastVolBar) and (bar_index - lastVolBar) <= recencyBars
+
+// =============================================================================
+//  DISCOUNT / PREMIUM — JAMBE DU DERNIER BOS H1
+// =============================================================================
+legH = h1RangeHigh
+legL = h1RangeLow
+mid  = h1Mid
+favFib  = not na(mid) and (bias == 1 ? close <= mid : bias == -1 ? close >= mid : false)
+zoneStr = na(mid) ? "Range H1 indisponible" : close <= mid ? "Discount H1" : "Premium H1"
+
+showFibZones = fibMode == "Zones + 50%"
+showFibLine  = fibMode != "Off"
+var box   discBox = na
+var box   premBox = na
+var line  midLine = na
+var label eqLab   = na
+if barstate.islast and showFibLine and bar_index > legLen and not na(mid) and not na(legH) and not na(legL)
+    if na(midLine)
+        midLine := line.new(bar_index - legLen, mid, bar_index + lineExt, mid, xloc = xloc.bar_index, color = color.new(color.gray, 0), style = line.style_dashed)
+        eqLab   := label.new(bar_index + lineExt, mid, "EQ H1 50%", style = label.style_label_left, color = color.new(color.gray, 90), textcolor = color.new(color.gray, 0), size = size.small)
+    line.set_xy1(midLine, bar_index - legLen, mid)
+    line.set_xy2(midLine, bar_index + lineExt, mid)
+    label.set_xy(eqLab, bar_index + lineExt, mid)
+    if showFibZones
+        if na(discBox)
+            discBox := box.new(bar_index - legLen, mid, bar_index, legL, xloc = xloc.bar_index, bgcolor = discCol, border_color = color.new(discCol, 40))
+            premBox := box.new(bar_index - legLen, legH, bar_index, mid, xloc = xloc.bar_index, bgcolor = premCol, border_color = color.new(premCol, 40))
+        box.set_left(discBox, bar_index - legLen), box.set_right(discBox, bar_index + lineExt), box.set_top(discBox, mid), box.set_bottom(discBox, legL)
+        box.set_left(premBox, bar_index - legLen), box.set_right(premBox, bar_index + lineExt), box.set_top(premBox, legH), box.set_bottom(premBox, mid)
+
+// =============================================================================
+//  NIVEAUX DE SESSION (ORH/ORL · Asie · Londres) + PDH/PDL
+// =============================================================================
+f_sess(_show, _sess, _tz, _col, _tag, _style, _width, _lsize, _ext) =>
+    var float hi  = na
+    var float lo  = na
+    var int   x0  = na
+    var line  lnH = na
+    var line  lnL = na
+    var label lbH = na
+    var label lbL = na
+    inS  = _show and not na(time(timeframe.period, _sess, _tz))
+    strt = inS and not inS[1]
+    endS = (not inS) and inS[1]
+    if strt
+        hi := high
+        lo := low
+        x0 := bar_index
+    else if inS
+        hi := math.max(hi, high)
+        lo := math.min(lo, low)
+    if endS and not na(hi)
+        if not na(lnH)
+            line.delete(lnH)
+            line.delete(lnL)
+            label.delete(lbH)
+            label.delete(lbL)
+        lnH := line.new(x0, hi, bar_index + _ext, hi, xloc = xloc.bar_index, color = _col, style = _style, width = _width)
+        lnL := line.new(x0, lo, bar_index + _ext, lo, xloc = xloc.bar_index, color = _col, style = _style, width = _width)
+        lbH := label.new(bar_index + _ext, hi, _tag + " H", style = label.style_label_left, color = color.new(_col, 88), textcolor = _col, size = _lsize)
+        lbL := label.new(bar_index + _ext, lo, _tag + " L", style = label.style_label_left, color = color.new(_col, 88), textcolor = _col, size = _lsize)
+    if not na(lnH)
+        line.set_x2(lnH, bar_index + _ext)
+        line.set_x2(lnL, bar_index + _ext)
+        label.set_x(lbH, bar_index + _ext)
+        label.set_x(lbL, bar_index + _ext)
+    int(na)
+
+f_sess(showOR,   orSess,   sessTz, orCol,   "OR",   f_lineStyle(lvlStyle), lvlWidth, f_size(lvlLblSize), lvlExtend)
+f_sess(showAsia, asiaSess, sessTz, asiaCol, "ASIA", f_lineStyle(lvlStyle), lvlWidth, f_size(lvlLblSize), lvlExtend)
+f_sess(showLon,  lonSess,  sessTz, lonCol,  "LON",  f_lineStyle(lvlStyle), lvlWidth, f_size(lvlLblSize), lvlExtend)
+
+// =============================================================================
+//  MOTEUR STRICT — SESSIONS ET LIQUIDITÉS EXTERNES
+// =============================================================================
+inAsiaCore    = not na(time(timeframe.period, asiaSess, sessTz))
+inSequence    = not na(time(timeframe.period, seqSess, sessTz))
+inNY          = not na(time(timeframe.period, nyTradeSess, sessTz))
+inFlatCore    = not na(time(timeframe.period, flatSess, sessTz))
+inLonG        = useLonGate and not na(time(timeframe.period, lonTradeSess, sessTz))
+sessOK        = (inNY and not inFlatCore) or inLonG
+sessStr       = inFlatCore ? "Clôture forcée" : inNY ? "NY" : inLonG ? "Londres" : "Hors entrée"
+tfOK          = not enforceM5 or (timeframe.isminutes and timeframe.multiplier == 5)
+entryWindowEnded = not sessOK and sessOK[1]
+
+// PDH/PDL en journée civile `sessTz` (00:00–24:00) : calcul unique, utilisé à
+// la fois pour la ligne affichée et pour le sweep strict, afin que le niveau
+// visible corresponde toujours à celui qui déclenche réellement un signal.
+bool newCalendarDayCore = bar_index == 0 or year(time, sessTz) != year(time[1], sessTz) or month(time, sessTz) != month(time[1], sessTz) or dayofmonth(time, sessTz) != dayofmonth(time[1], sessTz)
+var float developingDayHighCore = na
+var float developingDayLowCore = na
+var float corePdh = na
+var float corePdl = na
+var int   coreDayStart = na
+var float coreAsiaHigh = na
+var float coreAsiaLow = na
+if newCalendarDayCore
+    corePdh := developingDayHighCore
+    corePdl := developingDayLowCore
+    coreDayStart := bar_index
+    developingDayHighCore := high
+    developingDayLowCore := low
+    coreAsiaHigh := na
+    coreAsiaLow := na
+else
+    developingDayHighCore := math.max(developingDayHighCore, high)
+    developingDayLowCore := math.min(developingDayLowCore, low)
+if inAsiaCore
+    coreAsiaHigh := na(coreAsiaHigh) ? high : math.max(coreAsiaHigh, high)
+    coreAsiaLow := na(coreAsiaLow) ? low : math.min(coreAsiaLow, low)
+
+var line  pdhLine = na
+var line  pdlLine = na
+var label pdhLab  = na
+var label pdlLab  = na
+if showPD and not na(corePdh)
+    if na(pdhLine)
+        pdhLine := line.new(coreDayStart, corePdh, bar_index + lvlExtend, corePdh, xloc = xloc.bar_index, color = pdhCol, style = f_lineStyle(lvlStyle), width = lvlWidth)
+        pdlLine := line.new(coreDayStart, corePdl, bar_index + lvlExtend, corePdl, xloc = xloc.bar_index, color = pdlCol, style = f_lineStyle(lvlStyle), width = lvlWidth)
+        pdhLab  := label.new(bar_index + lvlExtend, corePdh, "PDH", style = label.style_label_left, color = color.new(pdhCol, 88), textcolor = pdhCol, size = f_size(lvlLblSize))
+        pdlLab  := label.new(bar_index + lvlExtend, corePdl, "PDL", style = label.style_label_left, color = color.new(pdlCol, 88), textcolor = pdlCol, size = f_size(lvlLblSize))
+    line.set_xy1(pdhLine, coreDayStart, corePdh)
+    line.set_xy2(pdhLine, bar_index + lvlExtend, corePdh)
+    line.set_xy1(pdlLine, coreDayStart, corePdl)
+    line.set_xy2(pdlLine, bar_index + lvlExtend, corePdl)
+    label.set_xy(pdhLab, bar_index + lvlExtend, corePdh)
+    label.set_xy(pdlLab, bar_index + lvlExtend, corePdl)
+
+// Liquidités encore actives. Un niveau M15 balayé n'est réarmé que lorsqu'un
+// nouveau pivot M15 confirmé apparaît.
+chartBsl = array.size(hLvl) > 0 ? array.get(hLvl, array.size(hLvl) - 1) : na
+chartSsl = array.size(lLvl) > 0 ? array.get(lLvl, array.size(lLvl) - 1) : na
+var float seenM15High = na
+var float seenM15Low = na
+var float activeM15Bsl = na
+var float activeM15Ssl = na
+if not na(m15SwingHigh) and (na(seenM15High) or m15SwingHigh != seenM15High)
+    seenM15High := m15SwingHigh
+    activeM15Bsl := m15SwingHigh
+if not na(m15SwingLow) and (na(seenM15Low) or m15SwingLow != seenM15Low)
+    seenM15Low := m15SwingLow
+    activeM15Ssl := m15SwingLow
+if not na(activeM15Bsl) and high > activeM15Bsl
+    activeM15Bsl := na
+if not na(activeM15Ssl) and low < activeM15Ssl
+    activeM15Ssl := na
+
+f_liqLine(showChartLiq, chartBsl, liqHighCol, "BSL")
+f_liqLine(showChartLiq, chartSsl, liqLowCol, "SSL")
+f_liqLine(showM15Liq, activeM15Bsl, liqHighCol, "M15 BSL")
+f_liqLine(showM15Liq, activeM15Ssl, liqLowCol, "M15 SSL")
+f_liqLine(showPdLiq, corePdh, liqHighCol, "PDH · BSL")
+f_liqLine(showPdLiq, corePdl, liqLowCol, "PDL · SSL")
+f_liqLine(showAsiaLiq, coreAsiaHigh, liqHighCol, "ASIA H · BSL")
+f_liqLine(showAsiaLiq, coreAsiaLow, liqLowCol, "ASIA L · SSL")
+
+bool sweepPdlCore = usePdSweep and not na(corePdl) and low < corePdl and close > corePdl and low[1] >= corePdl
+bool sweepAsiaLowCore = useAsiaSweep and not na(coreAsiaLow) and low < coreAsiaLow and close > coreAsiaLow and low[1] >= coreAsiaLow
+bool sweepM15LowCore = useM15Sweep and not na(m15SwingLow) and low < m15SwingLow and close > m15SwingLow and low[1] >= m15SwingLow
+bool sweepPdhCore = usePdSweep and not na(corePdh) and high > corePdh and close < corePdh and high[1] <= corePdh
+bool sweepAsiaHighCore = useAsiaSweep and not na(coreAsiaHigh) and high > coreAsiaHigh and close < coreAsiaHigh and high[1] <= coreAsiaHigh
+bool sweepM15HighCore = useM15Sweep and not na(m15SwingHigh) and high > m15SwingHigh and close < m15SwingHigh and high[1] <= m15SwingHigh
+
+strictSellSideSweep = confirmed and inSequence and (sweepPdlCore or sweepAsiaLowCore or sweepM15LowCore)
+strictBuySideSweep = confirmed and inSequence and (sweepPdhCore or sweepAsiaHighCore or sweepM15HighCore)
+sellSweepSource = sweepPdlCore ? "PDL" : sweepAsiaLowCore ? "ASIA L" : sweepM15LowCore ? "M15 L" : "–"
+buySweepSource = sweepPdhCore ? "PDH" : sweepAsiaHighCore ? "ASIA H" : sweepM15HighCore ? "M15 H" : "–"
+sellSweepLevel = sweepPdlCore ? corePdl : sweepAsiaLowCore ? coreAsiaLow : sweepM15LowCore ? m15SwingLow : na
+buySweepLevel = sweepPdhCore ? corePdh : sweepAsiaHighCore ? coreAsiaHigh : sweepM15HighCore ? m15SwingHigh : na
+if showSweep and strictSellSideSweep
+    f_drawSweep(bar_index - 1, sellSweepLevel, sweepSellCol, false)
+if showSweep and strictBuySideSweep
+    f_drawSweep(bar_index - 1, buySweepLevel, sweepBuyCol, true)
+
+// =============================================================================
+//  CISD STRICT — INDÉPENDANT DE L'AFFICHAGE
+// =============================================================================
+var int strictCurDir = 0
+var float strictRunFirstOpen = na
+strictBullCisd = false
+strictBearCisd = false
+if confirmed
+    int strictThisDir = close > open ? 1 : close < open ? -1 : strictCurDir
+    if strictThisDir != strictCurDir and strictThisDir != 0
+        if strictThisDir == 1 and strictCurDir == -1 and not na(strictRunFirstOpen) and close > strictRunFirstOpen
+            strictBullCisd := true
+        else if strictThisDir == -1 and strictCurDir == 1 and not na(strictRunFirstOpen) and close < strictRunFirstOpen
+            strictBearCisd := true
+        strictCurDir := strictThisDir
+        strictRunFirstOpen := open
+
+atrCore = ta.atr(14)
+displacementCore = math.abs(close - open) >= bodyAtrMin * atrCore or high - low >= rangeAtrMin * atrCore
+
+// =============================================================================
+//  FVG RÉCENTS ET ÉVÉNEMENTS D'INVERSION IFVG
+// =============================================================================
+var array<float> coreFvgTops = array.new_float()
+var array<float> coreFvgBots = array.new_float()
+var array<int> coreFvgDirs = array.new_int()
+var array<int> coreFvgBars = array.new_int()
+varip int coreLastFvgBuildBar = na
+bool coreFirstFvgCalc = na(coreLastFvgBuildBar) or coreLastFvgBuildBar != bar_index
+
+if confirmed and bar_index >= 2 and coreFirstFvgCalc
+    float bullGapCore = low - high[2]
+    float bearGapCore = low[2] - high
+    if low > high[2] and bullGapCore >= fvgMinTicks
+        array.push(coreFvgTops, low)
+        array.push(coreFvgBots, high[2])
+        array.push(coreFvgDirs, 1)
+        array.push(coreFvgBars, bar_index)
+    if high < low[2] and bearGapCore >= fvgMinTicks
+        array.push(coreFvgTops, low[2])
+        array.push(coreFvgBots, high)
+        array.push(coreFvgDirs, -1)
+        array.push(coreFvgBars, bar_index)
+    coreLastFvgBuildBar := bar_index
+
+while array.size(coreFvgBars) > 200
+    array.shift(coreFvgTops)
+    array.shift(coreFvgBots)
+    array.shift(coreFvgDirs)
+    array.shift(coreFvgBars)
+
+strictBullIfvg = false
+strictBearIfvg = false
+float strictBullIfvgTop = na
+float strictBullIfvgBot = na
+float strictBearIfvgTop = na
+float strictBearIfvgBot = na
+int coreZ = array.size(coreFvgBars) - 1
+while coreZ >= 0
+    int coreCreated = array.get(coreFvgBars, coreZ)
+    float coreTop = array.get(coreFvgTops, coreZ)
+    float coreBot = array.get(coreFvgBots, coreZ)
+    int coreDir = array.get(coreFvgDirs, coreZ)
+    bool coreTooOld = bar_index - coreCreated > fvgKeepAge
+    bool coreBullInvert = not coreTooOld and bar_index > coreCreated and coreDir == -1 and close > coreTop
+    bool coreBearInvert = not coreTooOld and bar_index > coreCreated and coreDir == 1 and close < coreBot
+    if coreBullInvert and not strictBullIfvg
+        strictBullIfvg := true
+        strictBullIfvgTop := coreTop
+        strictBullIfvgBot := coreBot
+    if coreBearInvert and not strictBearIfvg
+        strictBearIfvg := true
+        strictBearIfvgTop := coreTop
+        strictBearIfvgBot := coreBot
+    if coreTooOld or coreBullInvert or coreBearInvert
+        array.remove(coreFvgTops, coreZ)
+        array.remove(coreFvgBots, coreZ)
+        array.remove(coreFvgDirs, coreZ)
+        array.remove(coreFvgBars, coreZ)
+    coreZ -= 1
+
+// =============================================================================
+//  SÉQUENCES DIRECTIONNELLES
+//  0 = aucune, 1 = sweep, 2 = CISD, 3 = plan prêt, 4 = niveau déclenché
+// =============================================================================
+var int lStage = 0
+var int lSweepBar = na
+var float lSweepExtreme = na
+var string lSweepSource = ""
+var int lCisdBar = na
+var int lPoiBar = na
+var float lPoiTop = na
+var float lPoiBot = na
+var string lPoiName = ""
+var float lLimit = na
+var float lStop = na
+var float lTp1 = na
+var float lTp2 = na
+var float lLiquidity = na
+
+var int sStage = 0
+var int sSweepBar = na
+var float sSweepExtreme = na
+var string sSweepSource = ""
+var int sCisdBar = na
+var int sPoiBar = na
+var float sPoiTop = na
+var float sPoiBot = na
+var string sPoiName = ""
+var float sLimit = na
+var float sStop = na
+var float sTp1 = na
+var float sTp2 = na
+var float sLiquidity = na
+
+var int strictSignalsToday = 0
+var string lastRejectReason = ""
+var int lastRejectBar = na
+if newCalendarDayCore
+    strictSignalsToday := 0
+    lStage := 0
+    sStage := 0
+    lLimit := na
+    sLimit := na
+    lastRejectReason := ""
+    lastRejectBar := na
+
+bool lExpired = (lStage == 1 and bar_index - lSweepBar > sweepMaxAge) or (lStage == 2 and (bar_index - lSweepBar > sweepMaxAge or bar_index - lCisdBar > cisdMaxAge)) or (lStage == 3 and bar_index - lPoiBar > poiMaxAge)
+bool sExpired = (sStage == 1 and bar_index - sSweepBar > sweepMaxAge) or (sStage == 2 and (bar_index - sSweepBar > sweepMaxAge or bar_index - sCisdBar > cisdMaxAge)) or (sStage == 3 and bar_index - sPoiBar > poiMaxAge)
+if lExpired or (entryWindowEnded and lStage == 3)
+    lStage := 0
+    lLimit := na
+if sExpired or (entryWindowEnded and sStage == 3)
+    sStage := 0
+    sLimit := na
+
+if strictSellSideSweep
+    lStage := 1
+    lSweepBar := bar_index
+    lSweepExtreme := low
+    lSweepSource := sellSweepSource
+    lCisdBar := na
+    lPoiBar := na
+    lLimit := na
+    lastRejectReason := ""
+    lastRejectBar := na
+    f_stageText(low, "1 · SWEEP " + sellSweepSource, true, sweepSellCol)
+if strictBuySideSweep
+    sStage := 1
+    sSweepBar := bar_index
+    sSweepExtreme := high
+    sSweepSource := buySweepSource
+    sCisdBar := na
+    sPoiBar := na
+    sLimit := na
+    lastRejectReason := ""
+    lastRejectBar := na
+    f_stageText(high, "1 · SWEEP " + buySweepSource, false, sweepBuyCol)
+
+longCisdAdvanced = false
+shortCisdAdvanced = false
+if lStage == 1 and strictBullCisd and bar_index > lSweepBar
+    lStage := 2
+    lCisdBar := bar_index
+    longCisdAdvanced := true
+    f_stageText(low, "2 · CISD +", true, cisdBullCol)
+if sStage == 1 and strictBearCisd and bar_index > sSweepBar
+    sStage := 2
+    sCisdBar := bar_index
+    shortCisdAdvanced := true
+    f_stageText(high, "2 · CISD −", false, cisdBearCol)
+
+if poiMode == "IFVG ou OB" and displacementCore and longCisdAdvanced
+    lStage := 3
+    lPoiBar := bar_index
+    lPoiTop := high[1]
+    lPoiBot := low[1]
+    lPoiName := "OB déplacement"
+    lLimit := na
+if poiMode == "IFVG ou OB" and displacementCore and shortCisdAdvanced
+    sStage := 3
+    sPoiBar := bar_index
+    sPoiTop := high[1]
+    sPoiBot := low[1]
+    sPoiName := "OB déplacement"
+    sLimit := na
+if lStage == 2 and strictBullIfvg and bar_index > lCisdBar
+    lStage := 3
+    lPoiBar := bar_index
+    lPoiTop := strictBullIfvgTop
+    lPoiBot := strictBullIfvgBot
+    lPoiName := "IFVG haussier"
+    lLimit := na
+if sStage == 2 and strictBearIfvg and bar_index > sCisdBar
+    sStage := 3
+    sPoiBar := bar_index
+    sPoiTop := strictBearIfvgTop
+    sPoiBot := strictBearIfvgBot
+    sPoiName := "IFVG baissier"
+    sLimit := na
+
+newLongPlan = false
+newShortPlan = false
+float stopBuffer = slBufTicks * syminfo.mintick
+if lStage == 3 and na(lLimit)
+    float candidateLimitLong = (lPoiTop + lPoiBot) / 2.0
+    float structuralStopLong = lSweepExtreme - stopBuffer
+    float volatilityStopLong = candidateLimitLong - minStopAtr * atrCore
+    float candidateStopLong = math.min(structuralStopLong, volatilityStopLong)
+    float candidateLiquidityLong = f_closestAbove(candidateLimitLong, candidateStopLong, minRR, corePdh, coreAsiaHigh, m15SwingHigh, h1RangeHigh)
+    bool biasOkLong = bias == 1 and allowLongDir
+    bool h4OkLong = not useH4Veto or h4Bias != -1
+    bool pdOkLong = not na(h1Mid) and candidateLimitLong <= h1Mid
+    bool geometryOkLong = candidateStopLong < candidateLimitLong and not na(candidateLiquidityLong)
+    if biasOkLong and h4OkLong and pdOkLong and geometryOkLong
+        lLimit := candidateLimitLong
+        lStop := candidateStopLong
+        lTp1 := candidateLimitLong + tp1R * (candidateLimitLong - candidateStopLong)
+        lTp2 := candidateLimitLong + minRR * (candidateLimitLong - candidateStopLong)
+        lLiquidity := candidateLiquidityLong
+        newLongPlan := true
+        lastRejectReason := ""
+        lastRejectBar := na
+    else
+        lastRejectReason := not biasOkLong ? "Biais H1/Direction" : not h4OkLong ? "Veto H4" : not pdOkLong ? "POI hors Discount" : "Pas de liquidité ≥ RR"
+        lastRejectBar := bar_index
+        lStage := 0
+
+if sStage == 3 and na(sLimit)
+    float candidateLimitShort = (sPoiTop + sPoiBot) / 2.0
+    float structuralStopShort = sSweepExtreme + stopBuffer
+    float volatilityStopShort = candidateLimitShort + minStopAtr * atrCore
+    float candidateStopShort = math.max(structuralStopShort, volatilityStopShort)
+    float candidateLiquidityShort = f_closestBelow(candidateLimitShort, candidateStopShort, minRR, corePdl, coreAsiaLow, m15SwingLow, h1RangeLow)
+    bool biasOkShort = bias == -1 and allowShortDir
+    bool h4OkShort = not useH4Veto or h4Bias != 1
+    bool pdOkShort = not na(h1Mid) and candidateLimitShort >= h1Mid
+    bool geometryOkShort = candidateLimitShort < candidateStopShort and not na(candidateLiquidityShort)
+    if biasOkShort and h4OkShort and pdOkShort and geometryOkShort
+        sLimit := candidateLimitShort
+        sStop := candidateStopShort
+        sTp1 := candidateLimitShort - tp1R * (candidateStopShort - candidateLimitShort)
+        sTp2 := candidateLimitShort - minRR * (candidateStopShort - candidateLimitShort)
+        sLiquidity := candidateLiquidityShort
+        newShortPlan := true
+        lastRejectReason := ""
+        lastRejectBar := na
+    else
+        lastRejectReason := not biasOkShort ? "Biais H1/Direction" : not h4OkShort ? "Veto H4" : not pdOkShort ? "POI hors Premium" : "Pas de liquidité ≥ RR"
+        lastRejectBar := bar_index
+        sStage := 0
+
+if newLongPlan
+    f_stageText(lLimit, "3 · " + lPoiName + " @50%", true, color.aqua)
+if newShortPlan
+    f_stageText(sLimit, "3 · " + sPoiName + " @50%", false, #e040fb)
+
+// =============================================================================
+//  CONFLUENCES OPTIONNELLES — ELLES PEUVENT BLOQUER, JAMAIS CRÉER UN GO
+// =============================================================================
+longSmtOK = smtManual or (smtAuto and smtRecent and lastSmtDir == 1)
+shortSmtOK = smtManual or (smtAuto and smtRecent and lastSmtDir == -1)
+longOptionalCount = (nearEma ? 1 : 0) + (longSmtOK ? 1 : 0) + (volOK ? 1 : 0) + (htfPoiContext ? 1 : 0)
+shortOptionalCount = (nearEma ? 1 : 0) + (shortSmtOK ? 1 : 0) + (volOK ? 1 : 0) + (htfPoiContext ? 1 : 0)
+longOptionalOK = not useOptionalGate or longOptionalCount >= minOptionalConf
+shortOptionalOK = not useOptionalGate or shortOptionalCount >= minOptionalConf
+
+tradesUsed = autoTradeCount ? strictSignalsToday : tradesToday
+tradesOK = tradesUsed < maxTrades
+riskLimitsOK = dailyLossPct < dailyLossCap and totalDdPct < totalDdCap
+coreBlockersOK = newsOK and tradesOK and riskLimitsOK and tfOK
+
+longTouch50 = lStage == 3 and bar_index > lPoiBar and sessOK and low <= lLimit and high >= lLimit
+shortTouch50 = sStage == 3 and bar_index > sPoiBar and sessOK and low <= sLimit and high >= sLimit
+goLong = confirmed and longTouch50 and coreBlockersOK and longOptionalOK
+goShort = confirmed and shortTouch50 and coreBlockersOK and shortOptionalOK and not goLong
+go = goLong or goShort
+
+if goLong
+    strictSignalsToday += 1
+    lStage := 4
+    sStage := 0
+    if showStageLabels
+        label.new(bar_index, low, "GO LONG", style = label.style_label_up, color = color.new(#26a69a, 0), textcolor = color.white, size = size.small)
+if goShort
+    strictSignalsToday += 1
+    sStage := 4
+    lStage := 0
+    if showStageLabels
+        label.new(bar_index, high, "GO SHORT", style = label.style_label_down, color = color.new(#ef5350, 0), textcolor = color.white, size = size.small)
+
+// =============================================================================
+//  PLAN, RISQUE ET NIVEAUX VISUELS
+// =============================================================================
+hasLongPlan = lStage >= 3 and not na(lLimit)
+hasShortPlan = sStage >= 3 and not na(sLimit)
+activePlanDir = hasLongPlan and (not hasShortPlan or bias == 1) ? 1 : hasShortPlan ? -1 : 0
+autoEntryPx = activePlanDir == 1 ? lLimit : activePlanDir == -1 ? sLimit : na
+autoSlPx = activePlanDir == 1 ? lStop : activePlanDir == -1 ? sStop : na
+autoTp1Px = activePlanDir == 1 ? lTp1 : activePlanDir == -1 ? sTp1 : na
+autoTp2Px = activePlanDir == 1 ? lTp2 : activePlanDir == -1 ? sTp2 : na
+autoTp3Px = activePlanDir == 1 ? lLiquidity : activePlanDir == -1 ? sLiquidity : na
+
+activeEntryPx = useAutoPlan ? autoEntryPx : entryPx
+activeSlPx = useAutoPlan ? autoSlPx : slPx
+activeTp1Px = useAutoPlan ? autoTp1Px : tp1Px
+activeTp2Px = useAutoPlan ? autoTp2Px : tp2Px
+activeTp3Px = useAutoPlan ? autoTp3Px : tp3Px
+riskDist = (not na(activeEntryPx) and not na(activeSlPx) and activeEntryPx > 0 and activeSlPx > 0) ? math.abs(activeEntryPx - activeSlPx) : na
+riskTicks = not na(riskDist) ? riskDist / syminfo.mintick : na
+riskAmt = capital * riskPct / 100.0
+posSize = (not na(riskTicks) and riskTicks > 0 and tickValue > 0) ? riskAmt / (riskTicks * tickValue) : na
+rr1 = (not na(riskDist) and riskDist > 0 and not na(activeTp1Px) and activeTp1Px > 0) ? math.abs(activeTp1Px - activeEntryPx) / riskDist : na
+rr2 = (not na(riskDist) and riskDist > 0 and not na(activeTp2Px) and activeTp2Px > 0) ? math.abs(activeTp2Px - activeEntryPx) / riskDist : na
+rrEff = not na(rr2) ? rr2 : rr1
+rrOK = not na(rrEff) and rrEff >= minRR
+setupDefined = not na(activeEntryPx) and not na(activeSlPx) and not na(activeTp1Px)
+
+f_hline(showTrade, activeEntryPx, color.new(#2962ff, 0), "ENTRY 50% POI", line.style_solid)
+f_hline(showTrade, activeSlPx,    color.new(#ef5350, 0), "SL SWEEP",       line.style_solid)
+f_hline(showTrade, activeTp1Px,   color.new(#ff9800, 0), "TP1",            line.style_dashed)
+f_hline(showTrade, activeTp2Px,   color.new(#26a69a, 0), "TP2",            line.style_dashed)
+f_hline(showTrade, activeTp3Px,   color.new(#ab47bc, 0), "LIQUIDITÉ",      line.style_dotted)
+
+bgcolor(sessOK ? color.new(#2962ff, 93) : inFlatCore ? color.new(#ef5350, 94) : na, title = "Fenêtre d'entrée / clôture")
+plotshape(goLong, title = "GO LONG strict", style = shape.triangleup, location = location.belowbar, color = color.new(#26a69a, 0), size = size.small, text = "GO")
+plotshape(goShort, title = "GO SHORT strict", style = shape.triangledown, location = location.abovebar, color = color.new(#ef5350, 0), size = size.small, text = "GO")
+
+// =============================================================================
+//  ÉTAT PROFESSIONNEL DE LA SÉQUENCE
+// =============================================================================
+activeStage = activePlanDir == 1 ? lStage : activePlanDir == -1 ? sStage : bias == 1 ? lStage : bias == -1 ? sStage : math.max(lStage, sStage)
+activeSweepSource = activePlanDir == 1 ? lSweepSource : activePlanDir == -1 ? sSweepSource : bias == 1 ? lSweepSource : bias == -1 ? sSweepSource : lStage >= sStage ? lSweepSource : sSweepSource
+activePoiName = activePlanDir == 1 ? lPoiName : activePlanDir == -1 ? sPoiName : "–"
+coreDisplayDir = activePlanDir != 0 ? activePlanDir : bias
+optionalCount = activePlanDir == 1 ? longOptionalCount : activePlanDir == -1 ? shortOptionalCount : bias == 1 ? longOptionalCount : shortOptionalCount
+optionalOK = activePlanDir == 1 ? longOptionalOK : activePlanDir == -1 ? shortOptionalOK : bias == 1 ? longOptionalOK : shortOptionalOK
+sweepCoreOK = activeStage >= 1
+cisdCoreOK = activeStage >= 2
+poiCoreOK = activeStage >= 3
+returnCoreOK = activeStage == 4
+pdPlanOK = activePlanDir == 1 ? activeEntryPx <= h1Mid : activePlanDir == -1 ? activeEntryPx >= h1Mid : false
+liquidityOK = activePlanDir != 0 and not na(autoTp3Px)
+stageStr = activeStage == 4 ? "Déclenché" : activeStage == 3 ? "Plan prêt · attente 50%" : activeStage == 2 ? "Attente POI" : activeStage == 1 ? "Attente CISD" : "Attente sweep"
+verdictStr = goLong ? "GO LONG" : goShort ? "GO SHORT" : activeStage == 4 ? "SIGNAL DÉJÀ DONNÉ" : activeStage == 3 ? "PLAN PRÊT" : activeStage == 2 ? "ATTENTE POI" : activeStage == 1 ? "ATTENTE CISD" : "NO SETUP"
+blockersOK = coreBlockersOK and optionalOK and sessOK
+string blockersStr = ""
+blockersStr += tfOK ? "" : "TF≠M5 "
+blockersStr += sessOK ? "" : "Session "
+blockersStr += newsOK ? "" : "News "
+blockersStr += tradesOK ? "" : "MaxTrades "
+blockersStr += riskLimitsOK ? "" : "Drawdown "
+blockersStr += optionalOK ? "" : "Confluences "
+blockersStr := blockersStr == "" ? "Aucun" : blockersStr
+recentReject = lastRejectReason != "" and not na(lastRejectBar) and bar_index - lastRejectBar <= poiMaxAge
+
+// =============================================================================
+//  TABLEAU DE BORD
+// =============================================================================
+okC   = color.new(#26a69a, 0)
+failC = color.new(#ef5350, 0)
+waitC = color.new(#ff9800, 0)
+infoC = color.new(#9e9e9e, 0)
+bgC   = dashBg
+
+f_row(_t, _r, _name, _state, _detail) =>
+    txtSz = f_size(dashSize)
+    stCol = _state == 1 ? okC : _state == 0 ? failC : infoC
+    stSym = _state == 1 ? "✓" : _state == 0 ? "✗" : "•"
+    table.cell(_t, 0, _r, _name, text_color = dashTxt, text_size = txtSz, text_halign = text.align_left, bgcolor = bgC)
+    table.cell(_t, 1, _r, stSym, text_color = stCol, text_size = txtSz, bgcolor = bgC)
+    table.cell(_t, 2, _r, _detail, text_color = dashTxt, text_size = txtSz, text_halign = text.align_left, bgcolor = bgC)
+
+var table dash = na
+if showDash and barstate.islast
+    if na(dash)
+        dash := table.new(f_pos(dashPos), 3, 22, border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+    txtSz = f_size(dashSize)
+    table.cell(dash, 0, 0, "ICT · STRICT V2.3 H1 FIX", text_color = dashTxt, text_size = txtSz, text_halign = text.align_left, bgcolor = dashHdr)
+    table.cell(dash, 1, 0, "St", text_color = dashTxt, text_size = txtSz, bgcolor = dashHdr)
+    table.cell(dash, 2, 0, str.tostring(optionalCount) + "/4 opt.", text_color = dashTxt, text_size = txtSz, text_halign = text.align_left, bgcolor = dashHdr)
+    f_row(dash, 1,  "1· Marché / TF",       tfOK ? 1 : 0, syminfo.ticker + " " + timeframe.period)
+    f_row(dash, 2,  "2· Biais structure H1", bias != 0 ? 1 : 0, biasStr)
+    f_row(dash, 3,  "3· Contexte H4",       h4VetoOK ? 1 : 0, useH4Veto ? (h4Bias == 1 ? "Bull" : h4Bias == -1 ? "Bear" : "Neutre") : "Veto désactivé")
+    f_row(dash, 4,  "4· Range structure H1", not na(h1Mid) ? 1 : 0, not na(h1Mid) ? h1RangeSourceStr + " · " + f_px(h1RangeLow) + " – " + f_px(h1RangeHigh) : "Attente pivots/cassure H1")
+    f_row(dash, 5,  "5· Premium/Discount",  activePlanDir == 0 ? -1 : pdPlanOK ? 1 : 0, activePlanDir == 0 ? zoneStr : activePlanDir == 1 ? "Entrée en Discount" : "Entrée en Premium")
+    f_row(dash, 6,  "6· Sweep externe",     sweepCoreOK ? 1 : 0, sweepCoreOK ? activeSweepSource : "PD/Asie/M15")
+    f_row(dash, 7,  "7· Ordre strict",      activeStage >= 1 ? 1 : -1, stageStr)
+    f_row(dash, 8,  "8· CISD directionnel", cisdCoreOK ? 1 : 0, cisdCoreOK ? (coreDisplayDir == 1 ? "Haussier après sweep" : coreDisplayDir == -1 ? "Baissier après sweep" : "Direction non validée") : "En attente")
+    f_row(dash, 9,  "9· POI après CISD",    poiCoreOK ? 1 : 0, poiCoreOK ? activePoiName : poiMode)
+    f_row(dash, 10, "10· Retour 50% POI",   returnCoreOK ? 1 : poiCoreOK ? -1 : 0, returnCoreOK ? "Touché" : poiCoreOK ? "Ordre limite en attente" : "Pas de plan")
+    f_row(dash, 11, "11· Liquidité ≥ " + str.tostring(minRR, "#.#") + "R", liquidityOK ? 1 : activePlanDir == 0 ? -1 : 0, liquidityOK ? f_px(autoTp3Px) : "–")
+    f_row(dash, 12, "12· EMA200 (option)",  nearEma ? 1 : -1, nearEma ? "Proche" : "Non requise")
+    f_row(dash, 13, "13· SMT (option)",     (coreDisplayDir == 1 ? longSmtOK : shortSmtOK) ? 1 : -1, smtManual ? "Manuel OK" : smtAuto and smtRecent ? (lastSmtDir == 1 ? "SMT +" : "SMT −") : "Non requis")
+    f_row(dash, 14, "14· Vol/HTF (option)", (volOK or htfPoiContext) ? 1 : -1, (volOK ? "Volume " : "") + (htfPoiContext ? "HTF POI" : volOK ? "" : "Non requis"))
+    f_row(dash, 15, "15· Session",          sessOK ? 1 : 0, sessStr + " · séq. " + seqSess)
+    f_row(dash, 16, "16· News / limites",   (newsOK and riskLimitsOK) ? 1 : 0, (newsOK ? "News OK" : "STOP news") + " · J " + str.tostring(dailyLossPct, "#.#") + "% / DD " + str.tostring(totalDdPct, "#.#") + "%")
+    f_row(dash, 17, "17· Entrée 50%",       setupDefined ? 1 : -1, f_px(activeEntryPx))
+    f_row(dash, 18, "18· SL / taille",      setupDefined ? 1 : -1, f_px(activeSlPx) + " · " + (na(posSize) ? "–" : str.tostring(posSize, "#.##")))
+    f_row(dash, 19, "19· TP1 / TP2",        rrOK ? 1 : setupDefined ? 0 : -1, f_px(activeTp1Px) + " / " + f_px(activeTp2Px) + " · " + str.tostring(tradesUsed) + "/" + str.tostring(maxTrades))
+    vBg = go ? color.new(#26a69a, 0) : activeStage == 3 ? color.new(#2962ff, 10) : activeStage > 0 ? color.new(#ff9800, 10) : color.new(#ef5350, 0)
+    table.cell(dash, 0, 20, "20· VERDICT", text_color = color.white, text_size = txtSz, text_halign = text.align_left, bgcolor = vBg)
+    table.cell(dash, 1, 20, go ? "✓" : activeStage > 0 ? "…" : "✗", text_color = color.white, text_size = txtSz, bgcolor = vBg)
+    table.cell(dash, 2, 20, verdictStr, text_color = color.white, text_size = txtSz, text_halign = text.align_left, bgcolor = vBg)
+    table.cell(dash, 0, 21, "Blocages actuels", text_color = dashTxt, text_size = txtSz, text_halign = text.align_left, bgcolor = bgC)
+    table.cell(dash, 1, 21, blockersOK ? "✓" : "✗", text_color = blockersOK ? okC : failC, text_size = txtSz, bgcolor = bgC)
+    table.cell(dash, 2, 21, recentReject and activeStage == 0 ? "Rejet récent · " + lastRejectReason : blockersStr, text_color = dashTxt, text_size = txtSz, text_halign = text.align_left, bgcolor = bgC)
+
+// =============================================================================
+//  ALERTES
+// =============================================================================
+alertcondition(sweepBuyEvt,  title = "Sweep pivot visuel buy-side",  message = "ICT : sweep pivot visuel buy-side sur {{ticker}} {{interval}}")
+alertcondition(sweepSellEvt, title = "Sweep pivot visuel sell-side", message = "ICT : sweep pivot visuel sell-side sur {{ticker}} {{interval}}")
+alertcondition(strictBuySideSweep, title = "Sweep externe buy-side", message = "ICT strict : sweep PDH/Asie/M15 haut sur {{ticker}} {{interval}}")
+alertcondition(strictSellSideSweep, title = "Sweep externe sell-side", message = "ICT strict : sweep PDL/Asie/M15 bas sur {{ticker}} {{interval}}")
+alertcondition(ifvgEvt, title = "Inversion FVG visuelle", message = "ICT : IFVG visuel sur {{ticker}} {{interval}}")
+alertcondition(strictBullCisd, title = "CISD strict haussier", message = "ICT strict : CISD haussier sur {{ticker}} {{interval}}")
+alertcondition(strictBearCisd, title = "CISD strict baissier", message = "ICT strict : CISD baissier sur {{ticker}} {{interval}}")
+alertcondition(newLongPlan, title = "Plan LONG prêt", message = "ICT strict : plan LONG prêt, attente du retour 50% sur {{ticker}} {{interval}}")
+alertcondition(newShortPlan, title = "Plan SHORT prêt", message = "ICT strict : plan SHORT prêt, attente du retour 50% sur {{ticker}} {{interval}}")
+alertcondition(bosBullEvt, title = "BOS H1 haussier", message = "ICT : BOS H1 haussier sur {{ticker}} {{interval}}")
+alertcondition(bosBearEvt, title = "BOS H1 baissier", message = "ICT : BOS H1 baissier sur {{ticker}} {{interval}}")
+alertcondition(mssBullEvt, title = "MSS visuel haussier", message = "ICT : MSS/CHOCH visuel haussier sur {{ticker}} {{interval}}")
+alertcondition(mssBearEvt, title = "MSS visuel baissier", message = "ICT : MSS/CHOCH visuel baissier sur {{ticker}} {{interval}}")
+alertcondition(goLong, title = "GO LONG strict", message = "Checklist V2 : GO LONG strict sur {{ticker}} {{interval}}")
+alertcondition(goShort, title = "GO SHORT strict", message = "Checklist V2 : GO SHORT strict sur {{ticker}} {{interval}}")
+alertcondition(inFlatCore and not inFlatCore[1], title = "Clôture forcée NY", message = "Checklist V2 : annuler les plans et clôturer à 15:55 NY sur {{ticker}}")
+alertcondition(not sessOK, title = "Hors fenêtre d'entrée", message = "Checklist V2 : hors fenêtre d'entrée sur {{ticker}}")

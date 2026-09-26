@@ -62,6 +62,46 @@ filters to get a usable sample size, try the indicator's optional gates on
 S2 to see if they help here too, and/or widen the date range once you've
 seen these numbers hold (or not) out of sample.
 
+## Parameter sensitivity (`experiments/param_sweep.py`)
+
+A first pass at loosening/tightening the default filters, still on the
+same 2023-2025 NQ window (reuses the cached parquet in `data/cache/`, no
+extra Databento cost):
+
+| S1 variant | signals | filled | win rate | PF | expectancy | total R |
+|---|---|---|---|---|---|---|
+| baseline | 6 | 2 | 0% | 0.00 | -1.00R | -2.0R |
+| **wide_kz_sync2** (killzone merged into one continuous 02:00-11:00 NY window, SMT sync tolerance 1→2 bars, MSS lookahead 12→24, POI validity 36→60) | **16** | **11** | **36%** | **3.52** | **+1.61R** | **+17.7R** |
+| loose_disp (looser displacement thresholds on top of the above) | 14 | 6 | 0% | 0.00 | -1.00R | -6.0R |
+
+| S2 variant | signals | filled | win rate | PF | expectancy | total R |
+|---|---|---|---|---|---|---|
+| baseline | 56 | 32 | 34% | 0.39 | -0.41R | -13.3R |
+| **wider_buffer** (stop buffer 0.1→0.25 ATR, entry fill window 12→24 bars) | 56 | 40 | 38% | 0.59 | -0.26R | -10.5R |
+| wider_buffer_looser_disp | 40 | 30 | 30% | 0.45 | -0.46R | -13.7R |
+| tighter_zone_age (HTF zone max age 80→40 H1 bars, on top of wider_buffer) | 54 | 40 | 38% | 0.59 | -0.26R | -10.5R |
+
+Two clear directional findings:
+
+- **The killzone/SMT tolerance, not the displacement strictness, was
+  starving S1 of sample size.** Merging London+NY-AM into one continuous
+  window and giving SMT pivots ±2 bars of sync tolerance took S1 from 2
+  filled trades to 11, and flipped it from a single -2R loss to +17.7R
+  (PF 3.52). **Loosening displacement thresholds made both strategies
+  worse**, not better — the follow-through strength is doing real work,
+  it isn't just a sample-size tax.
+- **Widening S2's stop and giving entries more time to fill helps but
+  doesn't flip it profitable** (PF 0.39→0.59, expectancy -0.41R→-0.26R).
+  HTF zone age wasn't a binding constraint (80 vs 40 H1 bars gave
+  near-identical results).
+
+**Take the S1 `wide_kz_sync2` result with real caution**: it's the best
+of 3 variants tried on the *same* 2-year window used to pick it, and 11
+filled trades is still a small sample — this is exactly the setup for
+overfitting to one period. Before trusting it, it needs to hold up on a
+different date range and/or a different but related instrument (e.g.
+ES/MES) without re-tuning.
+
 ## Layout
 
 ```

@@ -35,9 +35,9 @@ class Signal:
     meta: dict = field(default_factory=dict)
 
 
-def _in_any_killzone(ts: pd.Timestamp) -> bool:
+def _in_any_killzone(ts: pd.Timestamp, killzones) -> bool:
     hm = ts.strftime("%H:%M")
-    for start, end in KILLZONES:
+    for start, end in killzones:
         if start <= hm < end:
             return True
     return False
@@ -48,9 +48,10 @@ def generate_signals(m5: pd.DataFrame, es_m5: pd.DataFrame,
                       body_atr_min: float = 0.5, range_atr_min: float = 1.2,
                       min_rr: float = 1.5, sl_buffer_pct_atr: float = 0.1,
                       smt_left: int = 3, smt_right: int = 1,
-                      smt_sync_bars: int = 1) -> list[Signal]:
+                      smt_sync_bars: int = 1, killzones=None) -> list[Signal]:
     """m5, es_m5: DatetimeIndex in America/New_York, columns open/high/low/close.
     Both must cover the same date range (SMT is matched by timestamp)."""
+    killzones = killzones if killzones is not None else KILLZONES
     a = calc_atr(m5, 14)
     pdh_pdl = sessions.previous_day_high_low(m5)
     asia = sessions.session_high_low(m5, *sessions.ASIA_SESSION)
@@ -61,7 +62,7 @@ def generate_signals(m5: pd.DataFrame, es_m5: pd.DataFrame,
 
     for i in range(30, n - 1):
         ts = m5.index[i]
-        if not _in_any_killzone(ts):
+        if not _in_any_killzone(ts, killzones):
             continue
 
         day = pd.Timestamp(ts.date())

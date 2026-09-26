@@ -18,6 +18,22 @@ def trades_to_frame(trades: list[TradeResult]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def streaks(r_multiples) -> tuple[int, int]:
+    """(max_consecutive_wins, max_consecutive_losses) over an ordered
+    sequence of R-multiples (order matters - sort by fill time first)."""
+    max_win = max_loss = cur_win = cur_loss = 0
+    for r in r_multiples:
+        if r > 0:
+            cur_win += 1
+            cur_loss = 0
+        else:
+            cur_loss += 1
+            cur_win = 0
+        max_win = max(max_win, cur_win)
+        max_loss = max(max_loss, cur_loss)
+    return max_win, max_loss
+
+
 def summarize(df: pd.DataFrame) -> dict:
     filled = df[df["outcome"] != "no_fill"]
     n_signals = len(df)
@@ -25,6 +41,7 @@ def summarize(df: pd.DataFrame) -> dict:
     if n_filled == 0:
         return {"n_signals": n_signals, "n_filled": 0}
 
+    filled = filled.sort_values("ts_fill")
     wins = filled[filled["r_multiple"] > 0]
     losses = filled[filled["r_multiple"] <= 0]
     win_rate = len(wins) / n_filled
@@ -33,10 +50,11 @@ def summarize(df: pd.DataFrame) -> dict:
     profit_factor = gross_win / gross_loss if gross_loss > 0 else float("inf")
     expectancy_r = filled["r_multiple"].mean()
 
-    equity = filled.sort_values("ts_fill")["r_multiple"].cumsum()
+    equity = filled["r_multiple"].cumsum()
     running_max = equity.cummax()
     drawdown = equity - running_max
     max_dd_r = drawdown.min() if len(drawdown) else 0.0
+    max_consec_wins, max_consec_losses = streaks(filled["r_multiple"])
 
     return {
         "n_signals": n_signals,
@@ -49,6 +67,8 @@ def summarize(df: pd.DataFrame) -> dict:
         "max_drawdown_r": max_dd_r,
         "avg_win_r": wins["r_multiple"].mean() if len(wins) else 0.0,
         "avg_loss_r": losses["r_multiple"].mean() if len(losses) else 0.0,
+        "max_consec_wins": max_consec_wins,
+        "max_consec_losses": max_consec_losses,
     }
 
 

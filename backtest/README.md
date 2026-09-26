@@ -185,6 +185,45 @@ the trend-prone open. Tested on both windows at once, no cherry-picking:
 It made things worse, not better - the full-session version was
 better than the midday-only one in both windows.
 
+## Two more hypotheses (regime filters), and a look-ahead bug caught along the way
+
+Two follow-ups, both built from OHLCV alone (no order flow/DOM available):
+an H1 EMA trend filter on S3 (only fade *with* the prevailing H1 trend -
+pullback entries instead of pure counter-trend fading), and H1 EMA
+bias / H4 EMA veto gates on S1 (a mechanical proxy for the confluences a
+discretionary trader would want - the same two gates the reference
+indicator has, disabled by default there).
+
+**First pass looked spectacular for S3**: win rate 48%→69%, PF 1.16→2.73,
+and it *held up* on 2020-2023 unchanged (65% win rate, PF 2.41,
++154R). Before believing a result that good, the alignment code
+(`core/regime.py: align_to`) got a hard look - and it had a real
+look-ahead bug. `to_timeframe` labels an HTF bar by its *open* time, so
+the H1 bar labeled 10:00 only finishes closing at 11:00; the alignment
+helper was forward-filling that bar's EMA/bias value starting at 10:00
+itself, letting the filter see up to an hour of future price action
+before it happened. Fixed by lagging the HTF series one bar before
+aligning (`align_to(..., lag=1)`, now the default).
+
+**Rerun with the fix, the S3 result evaporated:**
+
+| S3 variant | signals | win rate | PF | expectancy | total R |
+|---|---|---|---|---|---|
+| no filter (baseline) | 505 | 48% | 1.16 | +0.084R | +42.3R |
+| H1 trend filter (buggy, leaked ~1h of future price) | 209 | 69% | 2.73 | +0.531R | +111.0R |
+| **H1 trend filter (fixed)** | **278** | **48.6%** | **0.98** | **-0.008R** | **-2.4R** |
+
+Once the leak was closed, the trend filter is statistically the same as
+no filter at all (or marginally worse) - it added nothing real. **The
+entire earlier "69% win rate" result was the bug**, not a discovery.
+
+The S1 gates (H1 bias, H4 veto, both) weren't materially affected by
+this particular bug (a look-ahead leak tends to inflate results, and
+these were already collapsing to a handful of all-losing trades before
+the fix too) - re-confirmed unprofitable after the fix, consistent with
+the reference indicator's own documented finding that these same gates
+lose money when tested.
+
 **Verdict: none of the three strategies tested in this repo (S1, S2, S3,
 in every variant tried) has a validated, out-of-sample edge on NQ over
 2020-2025.** That's a real, useful answer, not a non-answer: at M5/H1 on
@@ -199,16 +238,22 @@ retail-style single-instrument price patterns on major index futures.
 don't.** Not as pure mechanical systems, not yet. Passing a challenge is
 less about win rate and more about surviving the daily/max-loss limits
 long enough for a genuine (even modest) edge to play out - and none of
-these three has demonstrated one. Putting real risk behind an unvalidated
-system is choosing to gamble with the challenge fee and, if funded, real
-drawdown limits. If you want to keep pushing on this, the honest options
-are: (a) add a real information source these don't have access to yet
-(order flow / DOM, a macro or volatility regime filter, multi-instrument
-correlation beyond simple SMT), (b) test the same three designs on a
-different, possibly less arbitraged instrument, or (c) treat S1's raid
-logic as a discretionary confirmation layer under a human's judgment
-rather than a fully mechanical trigger - which is a fundamentally
-different (and harder to backtest) thing than what's built here.
+these three has demonstrated one, including after adding the two most
+obvious OHLCV-only regime filters (H1 trend alignment, H1 bias/H4 veto).
+Putting real risk behind an unvalidated system is choosing to gamble with
+the challenge fee and, if funded, real drawdown limits.
+
+Two of the three follow-up options from the previous round are now
+closed off (OHLCV-derived regime filters: tried, no edge; discretionary-
+style H1/H4 confluence gates: tried, actively hurts). What's left,
+honestly: (a) an information source genuinely outside what's in this
+repo - real order flow/DOM, options positioning, a cross-asset macro
+regime signal, not just another EMA on the same OHLCV bars; (b) the same
+three designs on a different, possibly less arbitraged instrument or
+timeframe; or (c) accept that S1's raid logic may only work as a
+discretionary confirmation layer under a human's live judgment, which is
+a fundamentally different (and much harder to backtest) thing than a
+mechanical trigger, and isn't something this repo can validate for you.
 
 ## Layout
 

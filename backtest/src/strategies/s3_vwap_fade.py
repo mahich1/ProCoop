@@ -19,6 +19,10 @@ Rules:
      VWAP is snapshotted at signal time as a fixed target - it isn't
      re-computed bar by bar during the trade (documented simplification).
   7. At most `max_trades_per_day` signals per NY calendar day.
+  8. Optional H1 trend filter (trend_htf): only fade WITH the prevailing
+     H1 trend (long fades when H1 is bullish/flat, short fades when H1
+     is bearish/flat) - a pullback-entry reframing rather than pure
+     counter-trend fading in both directions regardless of context.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from ..core.regime import align_to, ema_bias
 from ..core.structure import atr as calc_atr
 from ..core.vwap import session_vwap
 
@@ -46,11 +51,17 @@ class Signal:
 
 def generate_signals(m5: pd.DataFrame, k_entry: float = 1.5, atr_len: int = 14,
                       stop_buffer_atr: float = 0.3, session_start: str = "09:55",
-                      session_end: str = "15:45", max_trades_per_day: int = 1
+                      session_end: str = "15:45", max_trades_per_day: int = 1,
+                      trend_htf: pd.DataFrame | None = None, trend_ema_len: int = 50
                       ) -> list[Signal]:
     a = calc_atr(m5, atr_len)
     vwap = session_vwap(m5)
     n = len(m5)
+
+    trend_m5 = None
+    if trend_htf is not None:
+        bias_htf = ema_bias(trend_htf, trend_ema_len)
+        trend_m5 = align_to(bias_htf, m5.index)
 
     signals: list[Signal] = []
     traded_today: dict = {}
@@ -77,6 +88,14 @@ def generate_signals(m5: pd.DataFrame, k_entry: float = 1.5, atr_len: int = 14,
             direction = 1
         if direction is None:
             continue
+
+        if trend_m5 is not None:
+            bias = trend_m5.iloc[i]
+            if not np.isnan(bias):
+                if direction > 0 and bias < 0:  # long fade against a bearish H1 trend
+                    continue
+                if direction < 0 and bias > 0:  # short fade against a bullish H1 trend
+                    continue
 
         count_today = traded_today.get(day, 0)
         if count_today >= max_trades_per_day:

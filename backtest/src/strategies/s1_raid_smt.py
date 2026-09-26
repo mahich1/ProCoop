@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from ..core import sessions, smt as smt_mod
+from ..core.regime import align_to, ema_bias
 from ..core.structure import atr as calc_atr
 from ..core.structure import displacement_leg, fair_value_gaps, pivot_highs_lows
 
@@ -48,14 +49,31 @@ def generate_signals(m5: pd.DataFrame, es_m5: pd.DataFrame,
                       body_atr_min: float = 0.5, range_atr_min: float = 1.2,
                       min_rr: float = 1.5, sl_buffer_pct_atr: float = 0.1,
                       smt_left: int = 3, smt_right: int = 1,
-                      smt_sync_bars: int = 1, killzones=None) -> list[Signal]:
+                      smt_sync_bars: int = 1, killzones=None,
+                      h1_bias_htf: pd.DataFrame | None = None,
+                      h4_veto_htf: pd.DataFrame | None = None,
+                      bias_ema_len: int = 50) -> list[Signal]:
     """m5, es_m5: DatetimeIndex in America/New_York, columns open/high/low/close.
-    Both must cover the same date range (SMT is matched by timestamp)."""
+    Both must cover the same date range (SMT is matched by timestamp).
+
+    h1_bias_htf / h4_veto_htf: optional H1/H4 OHLC frames. When given, a
+    mechanical proxy for the confluences a discretionary trader would want:
+    - h1_bias_htf: only take a raid in the direction the H1 EMA bias agrees
+      with (skip if it disagrees; take it if neutral/unavailable).
+    - h4_veto_htf: block the raid outright if the H4 EMA bias opposes it.
+    """
     killzones = killzones if killzones is not None else KILLZONES
     a = calc_atr(m5, 14)
     pdh_pdl = sessions.previous_day_high_low(m5)
     asia = sessions.session_high_low(m5, *sessions.ASIA_SESSION)
     fvg = fair_value_gaps(m5)
+
+    h1_bias_m5 = None
+    if h1_bias_htf is not None:
+        h1_bias_m5 = align_to(ema_bias(h1_bias_htf, bias_ema_len), m5.index)
+    h4_veto_m5 = None
+    if h4_veto_htf is not None:
+        h4_veto_m5 = align_to(ema_bias(h4_veto_htf, bias_ema_len), m5.index)
 
     signals: list[Signal] = []
     n = len(m5)
@@ -88,6 +106,15 @@ def generate_signals(m5: pd.DataFrame, es_m5: pd.DataFrame,
                     (bar["high"] > level > bar["close"])
             if not swept:
                 continue
+
+            if h1_bias_m5 is not None:
+                b = h1_bias_m5.iloc[i]
+                if not np.isnan(b) and b != direction:
+                    continue
+            if h4_veto_m5 is not None:
+                v = h4_veto_m5.iloc[i]
+                if not np.isnan(v) and v == -direction:
+                    continue
 
             if not smt_mod.smt_at(m5, es_m5, ts, direction, smt_left, smt_right, smt_sync_bars):
                 continue

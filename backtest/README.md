@@ -102,6 +102,34 @@ overfitting to one period. Before trusting it, it needs to hold up on a
 different date range and/or a different but related instrument (e.g.
 ES/MES) without re-tuning.
 
+## Out-of-sample check: it didn't hold up
+
+Ran `wide_kz_sync2` unchanged (no re-tuning) on NQ/ES 2020-01-01 →
+2023-01-01 — three years, zero overlap with the 2023-2025 window it was
+picked on:
+
+| window | signals | filled | win rate | PF | expectancy | total R | avg win R |
+|---|---|---|---|---|---|---|---|
+| 2023-2025 (in-sample) | 16 | 11 | 36% | 3.52 | +1.61R | +17.7R | 6.17R |
+| 2020-2023 (out-of-sample) | 18 | 11 | 36% | 0.99 | -0.01R | -0.08R | 1.73R |
+
+**The overfitting warning played out exactly as flagged.** Win rate held
+almost identically across both windows (36%), but the in-sample profit
+factor was being carried by a handful of unusually large winners
+(avg win 6.17R) that simply weren't there in 2020-2023 (avg win 1.73R) —
+out of sample this setup is a coin flip at breakeven, not the +17.7R
+edge it looked like. That's consistent with 2023-2025 NQ having had a
+few outsized directional moves the setup happened to catch, rather than
+S1 (even with the loosened killzone/SMT filters) having a genuine,
+repeatable edge on this instrument.
+
+**Bottom line so far: neither S1 nor S2, in any variant tried, has shown
+a robust edge on NQ.** The honest next steps are either (a) treat this as
+a negative result and look for what's structurally different about the
+plain-English S1/S2 recipes vs. the reference indicator's actual (more
+heavily gated) entry logic, or (b) test on a different but related market
+(ES/MES) to see if the pattern is instrument-specific.
+
 ## Layout
 
 ```

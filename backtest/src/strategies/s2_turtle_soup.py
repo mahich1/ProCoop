@@ -64,62 +64,69 @@ def generate_signals(m5: pd.DataFrame, htf: pd.DataFrame,
     a = calc_atr(m5, 14)
     fvg_m5 = fair_value_gaps(m5)
     pdh_pdl = sessions.previous_day_high_low(m5)
-    zones = _htf_zones(htf, zone_max_age_bars)
+    all_zones = _htf_zones(htf, zone_max_age_bars)  # already time-ordered (built by htf bar index)
+    max_age_m5_bars = zone_max_age_bars * 12  # H1 bars -> approx M5 bars
 
     signals: list[Signal] = []
     n = len(m5)
-    active_high_since_entry: dict[int, float] = {}
-    active_low_since_entry: dict[int, float] = {}
-    entered_zone_at: dict[int, int] = {}
+    zone_ptr = 0
+    active_zones: list[dict] = []  # only zones confirmed, unmitigated and not yet aged out
 
     for i in range(30, n - 1):
         ts = m5.index[i]
         bar = m5.iloc[i]
         prev_close = m5.iloc[i - 1]["close"]
 
-        for zi, z in enumerate(zones):
-            if z["mitigated"] or ts <= z["confirmed_at"]:
-                continue
-            age_bars = i - m5.index.searchsorted(z["confirmed_at"])
-            if age_bars > zone_max_age_bars * 12:  # H1 bars -> approx M5 bars
-                z["mitigated"] = True
-                continue
+        # Admit newly-confirmed zones, in time order. Strict '<' matches the
+        # original per-bar check (`ts <= confirmed_at: skip`): a zone only
+        # becomes usable on the bar *after* its confirmation bar.
+        while zone_ptr < len(all_zones) and all_zones[zone_ptr]["confirmed_at"] < ts:
+            all_zones[zone_ptr]["_confirmed_i"] = m5.index.searchsorted(all_zones[zone_ptr]["confirmed_at"])
+            active_zones.append(all_zones[zone_ptr])
+            zone_ptr += 1
 
+        # Drop zones that are already mitigated or have aged out - keeps the
+        # per-bar scan bounded to a small, currently-relevant set instead of
+        # the full multi-year zone history.
+        if active_zones:
+            active_zones = [z for z in active_zones
+                             if not z["mitigated"] and (i - z["_confirmed_i"]) <= max_age_m5_bars]
+
+        for z in active_zones:
             zlow, zhigh = z["low"], z["high"]
             inside_now = zlow <= bar["close"] <= zhigh or zlow <= bar["high"] <= zhigh or zlow <= bar["low"] <= zhigh
             was_outside = not (zlow <= prev_close <= zhigh)
 
-            if inside_now and was_outside and zi not in entered_zone_at:
-                entered_zone_at[zi] = i
-                active_high_since_entry[zi] = bar["high"]
-                active_low_since_entry[zi] = bar["low"]
+            if inside_now and was_outside and "entered_at" not in z:
+                z["entered_at"] = i
+                z["active_high"] = bar["high"]
+                z["active_low"] = bar["low"]
                 approach_up = prev_close < zlow
                 approach_down = prev_close > zhigh
                 z["approach"] = "up" if approach_up else ("down" if approach_down else None)
                 continue
 
-            if zi not in entered_zone_at:
+            if "entered_at" not in z:
                 continue
 
             still_inside = zlow <= bar["high"] and bar["low"] <= zhigh
             if not still_inside:
                 z["mitigated"] = True
-                entered_zone_at.pop(zi, None)
                 continue
 
             approach = z.get("approach")
             if approach == "up":
-                local_high = active_high_since_entry[zi]
+                local_high = z["active_high"]
                 swept = bar["high"] > local_high and bar["close"] < local_high and bar["high"] <= zhigh * 1.0015
-                active_high_since_entry[zi] = max(active_high_since_entry[zi], bar["high"])
+                z["active_high"] = max(z["active_high"], bar["high"])
                 if not swept:
                     continue
                 direction = -1
                 sweep_extreme = bar["high"]
             elif approach == "down":
-                local_low = active_low_since_entry[zi]
+                local_low = z["active_low"]
                 swept = bar["low"] < local_low and bar["close"] > local_low and bar["low"] >= zlow * 0.9985
-                active_low_since_entry[zi] = min(active_low_since_entry[zi], bar["low"])
+                z["active_low"] = min(z["active_low"], bar["low"])
                 if not swept:
                     continue
                 direction = 1
@@ -160,7 +167,7 @@ def generate_signals(m5: pd.DataFrame, htf: pd.DataFrame,
             if risk <= 0:
                 continue
 
-            window_start = entered_zone_at[zi]
+            window_start = z["entered_at"]
             since_entry = m5.iloc[window_start:disp_i + 1]
             if direction < 0:
                 internal_target = since_entry["low"].min()
@@ -182,6 +189,5 @@ def generate_signals(m5: pd.DataFrame, htf: pd.DataFrame,
                       "zone_formed_at": z["formed_at"], "sweep_extreme": sweep_extreme},
             ))
             z["mitigated"] = True
-            entered_zone_at.pop(zi, None)
 
     return signals

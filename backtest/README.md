@@ -255,6 +255,134 @@ discretionary confirmation layer under a human's live judgment, which is
 a fundamentally different (and much harder to backtest) thing than a
 mechanical trigger, and isn't something this repo can validate for you.
 
+## Testing the actual indicator (`ICT_V2_7_8_CLEAR_PLAN.pine`), not an approximation
+
+Everything above tested plain-English recipes I wrote from the setup
+descriptions. The user then supplied the real Pine indicator and asked
+for the actual strategy to be tested and its weak points identified.
+`src/strategies/core_reversal.py` is a direct port of the file's default
+"moteur strict" - Sweep -> CISD -> POI (IFVG or displacement OB) -> 50%
+retracement -> GO - read from the source line by line, not reconstructed
+from the comments. Concretely more faithful than S1 in three ways that
+matter:
+
+- **Sweep consumption is per price level, not per day** (`f_firstCrossAvailable`,
+  the V2.7.7 change): once a level is crossed by a close, it's "spent"
+  until the price itself changes (new PDH, new session, ...), and the
+  sweep bar must be the *first* bar to cross it (`low[1] >= level`).
+- **CISD is a persistent level, not "close beyond a swing"**: it's the
+  OPEN of the first candle of the run that just ended, tested on every
+  closed bar until it fires or ages out (`f_cisdPersistent`) - not what
+  S1 approximated.
+- **POI is the current-timeframe IFVG or the CISD-candle's own
+  displacement, not an HTF zone** - matching the "IFVG ou OB" default
+  mode exactly, including the case where the OB *is* the CISD-confirming
+  candle itself.
+
+The confluence gates the script ships (H1 bias, H4 veto, Premium/Discount,
+minimum-RR) are left OFF, matching the shipped defaults - the script's
+own comments say they were tested and disabled because they lost money;
+they only produce a grade (A+/A/C) and don't block a GO in this
+configuration. Not ported: the HTF POI module (only an optional,
+off-by-default confluence), the additive SMT/CISD/MSS route, the
+H1->M5 Continuation engine, and the OR+FVG M1 route - four separate
+engines in the file that don't feed the core one tested here.
+
+### Results, same discipline (design on 2023-2025, validate unchanged on 2020-2023)
+
+| window | signals | win rate | PF | expectancy | total R | max DD |
+|---|---|---|---|---|---|---|
+| 2023-2025 (in-sample) | 276 | 43.1% | 1.19 | +0.107R | +29.4R | -21.8R |
+| 2020-2023 (out-of-sample) | 378 | 40.5% | 0.97 | -0.015R | -5.7R | -38.1R |
+
+Trade logs: `reports/core_reversal_2023-01-01_2025-01-01.csv` and
+`reports/core_reversal_2020-01-01_2023-01-01.csv`.
+
+This is a meaningfully different picture from S1's approximation, which
+went from a spectacular-looking PF 3.52 to a near-total collapse. Here,
+with a much larger and more faithful sample (276-378 trades per window,
+vs. 6-16 before), the profit factor sits right around 1.0 in *both*
+windows (0.97 and 1.19) - not a dramatic overfit-and-collapse pattern,
+but not a validated edge either. Combined across 5 years (654 trades),
+net expectancy is essentially zero (+23.7R total, ~0.036R/trade - well
+within noise for this sample size). Outcome breakdown rules out one
+obvious failure mode: "timeout" (target too far to realistically reach)
+is rare (1-3 trades out of hundreds per window), so the target-selection
+logic isn't secretly padding the numbers with unreachable targets.
+
+### Where the actual weak points are (code-level, from reading the source)
+
+1. **The core sequence has no edge once the gates that would otherwise
+   filter it are off - and they're off by design.** The script's own
+   changelog says `requirePdGate`, `requireRrGate`, `requireBiasGate` and
+   the H4 veto were measured to *lose* money on the author's own NAS100
+   backtests and were disabled for that reason. That's consistent with
+   what both our tests found (this repo's regime filters and the
+   script's own gates) - but it means the *shipped, default* strategy
+   runs on the raw sequence alone, which nets out to roughly zero edge.
+   There's no configuration currently in the file, on by default or
+   available as a toggle, that has demonstrated a real edge.
+2. **The checklist/grading system (A+/A/B/C) doesn't gate anything by
+   default** (`useOptionalGate = false`) - every setup that reaches the
+   50% retracement fires a GO regardless of grade. If the tool is meant
+   to be used as a discretionary checklist (its own title: "CHECKLIST
+   PRÉ-TRADE") where a trader only acts on A+/A signals, that's a
+   materially different, untested strategy from the one backtested here
+   - and grade alone (per the indicator's own V2.5.11 comment, measured
+     on NAS100 2005-2020) did not separate winners from losers either
+     (A+ -0.034R, A -0.093R, C -0.080R - the ranking is right, all three
+     lose).
+3. **Two trades/day, stopped at -1R each, is a rough fit for a
+   daily-loss-limited challenge account.** With a ~40% single-trade win
+   rate and independent-ish trades, hitting the daily cap of 2 signals
+   both losing (-2R on the day) isn't a tail event - it's roughly a
+   1-in-3 day, on a strategy that isn't even net positive out of sample.
+4. **The long history of correctifs (C1 through C14) reads as a
+   strategy that's hard to specify precisely, which is itself a signal.**
+   Several of these are genuine, well-reasoned bug fixes worth keeping
+   regardless of the edge question (see below) - but the sheer number of
+   iterations needed to close edge cases (a level re-crossed after
+   reclaim, a stop that could sit inside an already-traded zone, a CISD
+   lost because it fired on its own arming candle, mutating arrays on
+   unconfirmed ticks) suggests the setup's boundaries are genuinely
+   fuzzy, which tends to go along with a thin or absent edge rather than
+   a robust one.
+5. **Minor infidelity in this port, not a bug in the source:** when
+   multiple sweep sources qualify on the same bar, this port's tie-break
+   order (PDL, Asia, London, OR, M15) doesn't exactly match the script's
+   (PDL, London, Asia, OR, M15) — cosmetic (only affects which name gets
+   logged when two sources are hit simultaneously, not the trade itself)
+   but worth knowing if you diff behavior candle by candle.
+
+### What to keep
+
+The engineering, not the edge. Specifically:
+- **The correctifs are real fixes and should stay**: per-price-level
+  sweep consumption (V2.7.7), persistent CISD tested every bar instead
+  of only on the reversal candle (C1/V2.5.4), cancel-on-stop-first
+  (C3), reclaim invalidation with a 3-close tolerance instead of 1
+  (C14), confirmed-bar-only array mutation (C2), and the trailing
+  sweep-extreme option (C9) all fix real, well-documented edge cases -
+  they make the tool more correct as a *checklist*, independent of
+  whether the mechanical version has an edge.
+- **The sequence logic (sweep -> CISD -> POI -> retracement) is a
+  reasonable, well-structured definition of the setup** - the issue
+  isn't that it's incoherent, it's that, backtested honestly and
+  mechanically over 5 years of NQ, it doesn't clear the bar of a real
+  edge without the gates that the author already found don't help
+  either.
+- **Don't keep**: the assumption that disabling the confluence gates is
+  a free upgrade. It avoids the specific ways those gates were measured
+  to lose money, but the alternative it leaves you with is not
+  validated to win money - it's closer to noise, per the numbers above.
+- **If you want to keep using this indicator**, the honest path is
+  either (a) treat it strictly as a discretionary checklist and apply
+  your own judgment on top of the A+/A/B/C grade rather than trading
+  every GO mechanically (untested here, and hard to backtest by nature),
+  or (b) accept that, as a mechanical system, it needs a genuinely new
+  edge source layered on before real money - the same conclusion this
+  repo already reached with S1/S2/S3.
+
 ## Layout
 
 ```

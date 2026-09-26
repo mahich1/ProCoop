@@ -16,6 +16,10 @@ NY_AM_KILLZONE = ("08:30", "11:00")
 OR_WINDOW = ("09:30", "09:45")
 NY_TRADE_SESSION = ("09:35", "16:00")
 
+# "ICT 2022 model" session windows: index futures AM session and the PM session.
+ICT2022_AM_SESSION = ("08:30", "11:00")
+ICT2022_PM_SESSION = ("13:30", "16:00")
+
 
 def in_window(index: pd.DatetimeIndex, start: str, end: str) -> pd.Series:
     """Boolean mask: bar's NY local time-of-day falls in [start, end)."""

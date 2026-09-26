@@ -418,6 +418,39 @@ else found here: the "sweep -> displacement -> FVG -> retrace" skeleton
 alone, in any of the several exact variants tried across S1/CoreReversal/
 this model, has not produced a validated edge on NQ.
 
+## Top-down HTF PD array model (`src/strategies/topdown_pd_array.py`)
+
+Another user-supplied 5-step screenshot: D1 + H4 + H1 structure must
+agree, then find the HTF PD array (implemented as an unmitigated H4 FVG,
+reusing S2's zone bookkeeping), a London-session liquidity sweep testing
+that zone, a 5-minute BOS + FVG in the HTF bias direction, entry on the
+M5 FVG with a fixed 1:3R target and a 1R partial (stop to breakeven).
+
+| window | signals | filled | win rate | PF | expectancy | total R |
+|---|---|---|---|---|---|---|
+| 2023-2025 (in-sample) | 7 | 5 | 60% | 0.75 | -0.10R | -0.5R |
+| 2020-2023 (out-of-sample) | 17 | 11 | 36% | 0.50 | -0.32R | -3.5R |
+
+**The honest headline here is the sample size, not the sign of the
+result: 16 filled trades combined over 5 years is nowhere near enough to
+draw a statistical conclusion either way.** Requiring D1+H4+H1 alignment
+*and* a specific session *and* a zone-entry-then-sweep sequence is
+extremely restrictive - this is the same problem S1's original
+killzone-only version had (6 signals/2yr) before it was loosened, except
+here loosening would mean weakening the very top-down alignment the
+model is built around, which isn't a change to make lightly. For what
+it's worth, both windows independently came out with PF < 1 (0.75 and
+0.50) rather than one strong and one weak - a small lean toward "no edge"
+rather than "not enough data to tell," but with n=16 that's a lean, not
+a verdict. Trade logs: `reports/topdown_2023-01-01_2025-01-01.csv` and
+`reports/topdown_2020-01-01_2023-01-01.csv`.
+
+If you want a real answer for this one specifically, it needs either a
+much longer backtest window (10+ years, to get a usable sample without
+touching the alignment requirement) or accepting that a setup this
+selective is inherently something to grade case-by-case rather than
+backtest at scale.
+
 ## Layout
 
 ```

@@ -16,19 +16,51 @@ standalone Python pipeline rather than a port of the Pine script.
 
 ## Status
 
-The detection + simulation pipeline is implemented and validated against
-hand-crafted synthetic data (`tests/test_synthetic.py`) — it correctly
-fires signals with the expected direction/levels and the trade engine
-correctly fills/exits them. **It has not yet been run against real market
-data**: this sandbox's network policy blocks `hist.databento.com`
-(confirmed via `curl $HTTPS_PROXY/__agentproxy/status`), so pulling NQ/ES
-data from Databento is pending an egress allowlist update.
+The detection + simulation pipeline is implemented, validated against
+hand-crafted synthetic data (`tests/test_synthetic.py`), and has now been
+run once against real data (NQ.c.0 / ES.c.0, GLBX.MDP3, 1-minute bars,
+2023-01-01 → 2025-01-01, cost ≈ $5.13 on Databento).
 
 Run the sanity tests any time with:
 
 ```bash
 python3 tests/test_synthetic.py
 ```
+
+## Results (2023-01-01 → 2025-01-01, NQ.c.0)
+
+Trade log: `reports/trades_2023-01-01_2025-01-01.csv`. All figures are in
+R (risk multiples), independent of position sizing.
+
+| | signals | filled | fill rate | win rate | profit factor | expectancy | total R | max DD (R) |
+|---|---|---|---|---|---|---|---|---|
+| **S1** | 6 | 2 | 33% | 0% | 0.00 | -1.00R | -2.0R | -1.0R |
+| **S2** | 56 | 32 | 57% | 34% | 0.39 | -0.41R | -13.3R | -15.5R |
+| **Overall** | 62 | 34 | 55% | 32% | 0.36 | -0.45R | -15.3R | -17.5R |
+
+**As implemented here, over this 2-year window, neither strategy is
+profitable.** Read this with two big caveats:
+
+1. **S1's sample is tiny (6 signals in 2 years, only 2 filled).** That's
+   not enough to draw any conclusion either way — the raid+SMT+killzone
+   conjunction is just very rare with these parameters. It needs either a
+   much longer lookback or loosened filters (killzone window, SMT
+   sync tolerance, displacement thresholds) before the win/loss numbers
+   mean anything.
+2. **This is a direct implementation of the plain-English S1/S2
+   descriptions, not a port of `reference/ICT_V2_7_0_MULTI_ROUTES_INDICATOR.pine`.**
+   The indicator itself carries additional filters (H1 bias gate, H4 veto,
+   Premium/Discount gate, minimum-RR gate, fresh-liquidity requirement)
+   that its own changelog says were tested and *disabled by default*
+   because they lost money on the author's own NAS100 backtests — this
+   run's poor S2 profit factor is broadly consistent with that finding,
+   but the two are not directly comparable (different entry mechanics,
+   different sample window, no H1/H4 gating here).
+
+Likely next steps if you want to keep pushing on this: loosen S1's
+filters to get a usable sample size, try the indicator's optional gates on
+S2 to see if they help here too, and/or widen the date range once you've
+seen these numbers hold (or not) out of sample.
 
 ## Layout
 

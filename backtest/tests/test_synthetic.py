@@ -19,7 +19,7 @@ import pandas as pd
 from src.core.resample import to_timeframe
 from src.core.structure import atr, fair_value_gaps, pivot_highs_lows
 from src.backtest.engine import simulate_single_target, simulate_two_leg
-from src.strategies import s1_raid_smt, s2_turtle_soup
+from src.strategies import s1_raid_smt, s2_turtle_soup, s3_vwap_fade
 
 NY = "America/New_York"
 
@@ -207,10 +207,56 @@ def test_s2_signal_and_fill():
           sig.target_internal, sig.target_external, "->", trades[0].outcome, trades[0].r_multiple)
 
 
+# --------------------------------------------------------------------------
+# S3 - VWAP deviation fade, end to end
+# --------------------------------------------------------------------------
+
+def _build_s3_data():
+    idx = pd.date_range("2024-01-02 09:30", "2024-01-02 16:00", freq="5min",
+                         tz=NY, inclusive="left")
+    n = len(idx)
+    df = pd.DataFrame({
+        "open": np.full(n, 100.0), "high": np.full(n, 100.1),
+        "low": np.full(n, 99.9), "close": np.full(n, 100.0),
+        "volume": np.full(n, 1000.0),
+    }, index=idx)
+
+    push_start = df.index.get_indexer([pd.Timestamp("2024-01-02 11:30", tz=NY)])[0]
+    for k in range(push_start, push_start + 6):
+        j = k - push_start
+        _set_bar(df, df.index[k], o=100.5 + j * 0.5, h=101.2 + j * 0.5,
+                  l=100.3 + j * 0.5, c=101.0 + j * 0.5)
+
+    rev_i = push_start + 6  # reversal (red) candle at the stretched extreme
+    _set_bar(df, df.index[rev_i], o=103.6, h=103.7, l=103.2, c=103.3)
+    _set_bar(df, df.index[rev_i + 1], o=103.25, h=103.3, l=102.9, c=103.0)
+    for k in range(rev_i + 2, rev_i + 10):
+        frac = (k - (rev_i + 1)) / 8
+        c = 103.0 - frac * (103.0 - 100.5)
+        o = df.iloc[k - 1]["close"]
+        _set_bar(df, df.index[k], o=o, h=max(o, c) + 0.05, l=min(o, c) - 0.05, c=c)
+    return df
+
+
+def test_s3_signal_and_fill():
+    df = _build_s3_data()
+    sigs = s3_vwap_fade.generate_signals(df, k_entry=1.0, atr_len=14, stop_buffer_atr=0.3)
+    assert len(sigs) >= 1, "expected a fade signal on the engineered VWAP stretch"
+    sig = sigs[0]
+    assert sig.direction == -1
+    assert sig.stop > sig.entry > sig.target_internal > sig.target_external
+
+    trades = simulate_two_leg(sigs, df)
+    assert trades[0].ts_fill is not None, "next-bar-open entry should always fill"
+    print("test_s3_signal_and_fill OK:", sig.direction, sig.entry, sig.stop,
+          sig.target_internal, sig.target_external, "->", trades[0].outcome, trades[0].r_multiple)
+
+
 if __name__ == "__main__":
     test_pivot_highs_lows()
     test_fair_value_gaps()
     test_atr_positive()
     test_s1_signal_and_fill()
     test_s2_signal_and_fill()
+    test_s3_signal_and_fill()
     print("\nAll synthetic sanity tests passed.")

@@ -130,6 +130,86 @@ plain-English S1/S2 recipes vs. the reference indicator's actual (more
 heavily gated) entry logic, or (b) test on a different but related market
 (ES/MES) to see if the pattern is instrument-specific.
 
+## S3 — VWAP deviation fade (built for higher win rate / challenge fit)
+
+S1/S2 are low-frequency, asymmetric-RR setups - exactly the wrong shape
+for a prop-firm challenge, where a handful of trades either blow the
+daily-loss limit or barely dent the profit target. `s3_vwap_fade.py` is a
+different kind of strategy on purpose: mechanical, single-instrument,
+one clean idea (fade an overstretched move back toward session VWAP once
+a reversal candle confirms), aimed at a **higher win rate and much larger
+trade count** so the statistics are actually meaningful.
+
+Rules: skip the first ~25 min of the session; when `|close - VWAP| / ATR
+≥ k_entry` **and** the current candle already shows a pullback (red for a
+short fade, green for a long fade), enter at the next bar's open; stop
+beyond the signal candle's extreme + 0.3 ATR; take half size at the
+midpoint back to VWAP (stop then to breakeven), the rest at VWAP itself
+(snapshotted at signal time - a documented simplification, VWAP isn't
+re-targeted bar by bar).
+
+**In-sample (2023-2025, tuning k_entry and trades/day):**
+
+| variant | signals | win rate | PF | expectancy | total R | max DD |
+|---|---|---|---|---|---|---|
+| k_entry=1.5, 1 trade/day | 505 | 48% | 1.16 | +0.084R | +42.3R | -14.2R |
+| k_entry=1.0 | 508 | 51% | 1.00 | +0.002R | +1.2R | -25.8R |
+| k_entry=2.0 | 486 | 43% | 1.14 | +0.079R | +38.2R | -18.3R |
+| k_entry=1.5, 2 trades/day | 1004 | 45% | 1.05 | +0.026R | +26.5R | -33.1R |
+
+k_entry=1.5 at one trade/day looked the most promising (505 trades is a
+real sample, PF 1.16). **Ran it unchanged on 2020-2023:**
+
+| window | signals | win rate | PF | expectancy | total R | max DD |
+|---|---|---|---|---|---|---|
+| 2023-2025 (in-sample) | 505 | 48% | 1.16 | +0.084R | +42.3R | -14.2R |
+| 2020-2023 (out-of-sample) | 758 | 42% | 0.95 | -0.031R | **-23.3R** | -37.4R |
+
+Same story as S1: the edge didn't survive. One thing *did* hold up across
+both windows - the win/loss size ratio (avg win ≈1.2-1.5R vs a full -1R
+loss stayed consistent) - but the win rate itself swung from profitable
+to unprofitable between periods, which means the entry signal isn't
+reliably picking a favorable side, only the exit structure is stable.
+
+**One more hypothesis, tested honestly (not fit to either window):**
+restrict entries to 11:30-14:00 NY, the classic "lunch chop" window,
+on the reasoning that mean reversion should be more reliable away from
+the trend-prone open. Tested on both windows at once, no cherry-picking:
+
+| window | signals | win rate | PF | expectancy | total R |
+|---|---|---|---|---|---|
+| 2023-2025 | 473 | 40% | 0.99 | -0.005R | -2.4R |
+| 2020-2023 | 713 | 39% | 0.94 | -0.038R | -27.2R |
+| **combined 2020-2025** | **1186** | **40%** | **0.96** | **-0.025R** | **-29.6R** |
+
+It made things worse, not better - the full-session version was
+better than the midday-only one in both windows.
+
+**Verdict: none of the three strategies tested in this repo (S1, S2, S3,
+in every variant tried) has a validated, out-of-sample edge on NQ over
+2020-2025.** That's a real, useful answer, not a non-answer: at M5/H1 on
+plain OHLCV bars, simple ICT-style raid setups and simple VWAP
+mean-reversion both come out statistically indistinguishable from zero
+edge once tested honestly, on a market (NQ futures) that's about as
+liquid and heavily-traded-by-similar-strategies as it gets. That's
+consistent with what quantitative research generally finds about
+retail-style single-instrument price patterns on major index futures.
+
+**What this means for using any of this on a funded-account challenge:
+don't.** Not as pure mechanical systems, not yet. Passing a challenge is
+less about win rate and more about surviving the daily/max-loss limits
+long enough for a genuine (even modest) edge to play out - and none of
+these three has demonstrated one. Putting real risk behind an unvalidated
+system is choosing to gamble with the challenge fee and, if funded, real
+drawdown limits. If you want to keep pushing on this, the honest options
+are: (a) add a real information source these don't have access to yet
+(order flow / DOM, a macro or volatility regime filter, multi-instrument
+correlation beyond simple SMT), (b) test the same three designs on a
+different, possibly less arbitraged instrument, or (c) treat S1's raid
+logic as a discretionary confirmation layer under a human's judgment
+rather than a fully mechanical trigger - which is a fundamentally
+different (and harder to backtest) thing than what's built here.
+
 ## Layout
 
 ```

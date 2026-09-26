@@ -383,6 +383,41 @@ The engineering, not the edge. Specifically:
   edge source layered on before real money - the same conclusion this
   repo already reached with S1/S2/S3.
 
+## ICT "2022 model" (`src/strategies/ict_2022_model.py`)
+
+User-supplied screenshot of the classic ICT 2022 model: liquidity taken
+-> market structure shift -> FVG left behind -> retrace into it -> DOL
+(opposite liquidity), traded only in the AM (08:30-11:00 NY) and PM
+(13:30-16:00 NY) index-futures sessions - no SMT requirement, unlike S1.
+Same skeleton as S1 minus the SMT check, reusing already-validated code.
+
+| window | signals | filled | win rate | PF | expectancy | total R | max consec. losses |
+|---|---|---|---|---|---|---|---|
+| 2023-2025 (in-sample) | 136 | 81 | 13.6% | 1.05 | +0.043R | +3.5R | 19 |
+| 2020-2023 (out-of-sample) | 181 | 105 | 11.4% | 0.65 | -0.31R | **-32.4R** | **37** |
+
+**Worse than every other strategy tested in this repo, and a textbook
+overfitting trap.** The in-sample result looked marginally positive, but
+81 filled trades included exactly one +49.5R short that carries the
+entire total - remove it and in-sample is deeply negative too. Out of
+sample, that kind of outlier didn't repeat (best win there was +8.1R),
+leaving only the low win rate exposed: PF 0.65, -32.4R over 105 trades,
+and a 37-trade losing streak on the short side alone.
+
+By direction (out-of-sample, as asked): **short** PF 0.37, -31.5R over 54
+trades - clearly losing; **long** PF 0.98, -0.85R over 51 trades - flat,
+not an edge either. Neither side works. Trade logs:
+`reports/ict2022_2023-01-01_2025-01-01.csv` and
+`reports/ict2022_2020-01-01_2023-01-01.csv`.
+
+The low win rate (10-16%) combined with the fixed-liquidity target
+(PDH/PDL, often far from entry) makes this a high-variance, low-hit-rate
+system that needs its rare big winners to show up on schedule - and nothing
+in a 5-year sample suggests they do reliably. Consistent with everything
+else found here: the "sweep -> displacement -> FVG -> retrace" skeleton
+alone, in any of the several exact variants tried across S1/CoreReversal/
+this model, has not produced a validated edge on NQ.
+
 ## Layout
 
 ```

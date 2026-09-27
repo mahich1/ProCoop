@@ -451,6 +451,64 @@ touching the alignment requirement) or accepting that a setup this
 selective is inherently something to grade case-by-case rather than
 backtest at scale.
 
+## Trend-following breakout (`src/strategies/trend_breakout.py`) - the first result that actually held up
+
+Every setup above is an ICT-style intraday reversal pattern, and none of
+them survived out-of-sample testing. This is deliberately the opposite
+shape: a classic Donchian-channel breakout, Turtle System 1 style, on
+**daily** bars - long on a 20-day high breakout, short on a 20-day low
+breakout, initial stop at 2xATR(20), exit when the close crosses the
+*opposite* 10-day channel (no fixed profit target - ride the trend until
+it turns), one position at a time, no pyramiding.
+
+| window | trades | win rate | PF | expectancy | total R | max DD | max consec. losses |
+|---|---|---|---|---|---|---|---|
+| 2023-2025 (in-sample) | 17 | 53% | 2.49 | +0.55R | +9.4R | -3.16R | 4 |
+| 2020-2023 (out-of-sample) | 29 | 38% | 1.21 | +0.09R | +2.7R | -4.12R | 4 |
+| **combined 2020-2025** | **46** | **43%** | **1.64** | **+0.26R** | **+12.1R** | **-4.12R** | **4** |
+
+**This is the first strategy tested in this repo where the profit factor
+stayed above 1.0 in both independent windows.** It cooled off out of
+sample (2.49 -> 1.21, as basically every backtest does), but it didn't
+flip to unprofitable or collapse into noise the way S1, S3's regime
+filter, CoreReversal, and both ICT models all did. The drawdown profile
+is also structurally healthier: max 4 consecutive losses (vs. 11-37 for
+the ICT systems) and a max drawdown (-4.1R) that's a fraction of the
+total return (+12.1R) - roughly a 3:1 recovery ratio, something none of
+the other strategies here came close to.
+
+**Caveats, in order of importance:**
+- **46 trades over 5 years (~9/year) is still a modest sample** - real,
+  but nowhere near the hundreds of trades that would make this a
+  statistically airtight case. Treat it as a promising, not proven,
+  result.
+- **Only one parameter set was tried** (20-day entry / 10-day exit /
+  2xATR stop - the standard Turtle System 1 numbers), deliberately,
+  to avoid the sweep-until-something-looks-good trap that burned S1 and
+  S3's regime filter earlier. It has not been checked for sensitivity to
+  nearby parameters (e.g. 15/8 or 25/12) - that's a reasonable next
+  step, but every additional variant tried is another chance to
+  overfit, so it should be done sparingly and judged the same way
+  (design on one window, validate unchanged on the other).
+- **No fixed profit target means no clean R-multiple ceiling** - a
+  handful of trades that ride a strong trend for a long time are doing
+  a lot of the total-return work (same shape as any trend system), so
+  the total-R figure is more sensitive to a few big trades than the
+  ICT setups' fixed-target trades were.
+- Structurally low frequency (~9 trades/year) is a good fit for a
+  daily/total-loss-limited challenge account (see the earlier risk
+  management discussion) - fewer trades means fewer chances to stack
+  losses on the same day, though it also means it takes longer to reach
+  a profit target.
+
+Trade logs: `reports/trend_breakout_2023-01-01_2025-01-01.csv` and
+`reports/trend_breakout_2020-01-01_2023-01-01.csv`. Next reasonable
+steps if you want to build confidence further: check parameter
+sensitivity (once, on one window, then re-validate unchanged), test the
+same rules on ES/other correlated futures for cross-instrument
+consistency, and extend the backtest further back if more history is
+affordable, all before sizing any real risk behind it.
+
 ## Layout
 
 ```

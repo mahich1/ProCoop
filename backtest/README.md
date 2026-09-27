@@ -644,6 +644,66 @@ signal rather than refining it.
 Trade logs: `reports/sweepcisd_fvg_*.csv`, `reports/sweepcisd_ifvg_*.csv`,
 `reports/sweepcisd_mss_*.csv` (both windows each).
 
+## Does the sweep+CISD+FVG/IFVG edge generalise to the indicator's other sweep sources? (`experiments/sweep_source_check.py`)
+
+The Asia/London result above only exercises 2 of the 6 sweep-source
+toggles the live indicator ships (`usePdSweep`, `useAsiaSweep`,
+`useLonSweep`, `useOrSweep`, `useM15Sweep` default on; `useH1Sweep`
+default off). `sweep_cisd_direct.py` was generalised (new
+`sweep_sources` parameter, default unchanged so the Asia+London numbers
+above are untouched) to test the identical CISD -> POI -> direct-entry
+recipe - same tuning, nothing re-optimised per source - standalone
+against PDH/PDL, the finalised NY Opening Range (09:30-09:45 NY), and
+the M15 swing high/low (pivot length 2, same as the indicator's
+`m15PivotLen` default), plus all 5 combined:
+
+| source | mode | in-sample PF | out-of-sample PF | combined n | combined PF | total R | max DD (R) |
+|---|---|---|---|---|---|---|---|
+| PDH/PDL | FVG | 1.38 | 0.96 | 346 | 1.14 | +30.9R | -22.7R |
+| PDH/PDL | IFVG | 0.90 | 0.96 | 341 | 0.94 | -14.3R | -27.8R |
+| **OR (09:30-09:45)** | **FVG** | 1.62 | **1.62** | 540 | **1.62** | **+174.5R** | -16.6R |
+| OR (09:30-09:45) | IFVG | 1.29 | **1.80** | 485 | 1.58 | +144.8R | -15.2R |
+| **M15 swing** | FVG | 1.59 | 1.39 | 2997 | 1.47 | +867.9R | -35.1R |
+| **M15 swing** | **IFVG** | 1.62 | **1.74** | 2918 | **1.69** | **+1211.7R** | -22.8R |
+| All 5 combined | FVG | 1.31 | 1.38 | 4005 | 1.35 | +873.4R | -29.8R |
+| All 5 combined | IFVG | 1.52 | 1.46 | 3872 | 1.48 | +1135.3R | -37.5R |
+
+**The edge is not source-agnostic - it depends heavily on which level is
+swept:**
+
+- **PDH/PDL does not generalise.** FVG clears PF > 1 in-sample (1.38)
+  but falls to 0.96 out-of-sample; IFVG never clears 1.0 in either
+  window (0.90 / 0.96). Neither mode is usable on this source alone.
+- **OR and M15 swing generalise *better* than the original Asia/London
+  result**, on both counts that matter: PF and sample size. OR/FVG is
+  the most consistent number in this entire report - 1.62 in-sample,
+  1.62 out-of-sample, no drift at all. M15/IFVG is the single best
+  result in this repo by total R and trade count: PF actually improved
+  out-of-sample (1.62 -> 1.74) on nearly 3,000 trades (~3x the
+  Asia+London sample), for +1,211.7R combined.
+- **Combining all 5 sources is worse than M15 or OR alone** (PF 1.35 /
+  1.48 vs. M15's 1.47 / 1.69) - PDH/PDL's weak, inconsistent
+  contribution dilutes the two sources that actually carry an edge,
+  the same "wider source set dilutes a real signal" pattern already
+  seen when comparing this direct-entry engine to `core_reversal.py`'s
+  full 7-source sweep.
+
+**Bottom line: if extending the indicator's direct-entry route beyond
+Asia/London, add M15 swing and/or OR, not PDH/PDL.** M15/IFVG and
+OR/FVG are, on this evidence, better candidates than the original
+Asia+London config, not just additional confirmation of it.
+
+One caveat carried over from `structure.py`'s pivot detector (not
+introduced by this test): a confirmed M15 swing is marked knowable at
+the *open* timestamp of the bar `m15PivotLen` bars later rather than
+its close, a few minutes of look-ahead on a signal that persists for
+hours - consistent with the Pine indicator's own M15 security call,
+which explicitly uses `lookahead = barmerge.lookahead_on`. Negligible
+at this scale, but worth knowing if M15 swing timing is ever tightened.
+
+Trade logs: `reports/sweepcisd_{pdh_pdl,or,m15,all5}_{fvg,ifvg}_*.csv`
+(both windows each), summary table in `reports/sweep_source_check_summary.csv`.
+
 ## Layout
 
 ```

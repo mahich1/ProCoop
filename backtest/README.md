@@ -598,6 +598,52 @@ buy protection against the specific scenario (extremely violent, fast
 markets) most likely to blow through a daily-loss limit on a challenge
 account.
 
+## Asia/London sweep -> CISD -> {FVG | IFVG | MSS} direct entry, on M3 (`src/strategies/sweep_cisd_direct.py`)
+
+User's request: sweep only the two "major liquidity" sessions (Asia,
+London H/L - not the fuller PDH/PDL/OR/M15 set core_reversal.py sweeps),
+then persistent CISD, then enter AT MARKET the moment one of three
+second conditions confirms - no 50% retracement wait. Three independent
+modes, all on 3-minute bars:
+
+| mode | in-sample PF | out-of-sample PF | combined n | combined PF | combined total R |
+|---|---|---|---|---|---|
+| **FVG** (fresh directional FVG) | 1.03 | **1.51** | 911 | **1.30** | +168.0R |
+| **IFVG** (inverted FVG fires) | 1.46 | 1.37 | 867 | **1.41** | **+222.8R** |
+| MSS (plain structure break) | 0.89 | 1.08 | 817 | 1.00 | -0.8R |
+
+**FVG and IFVG are, on a trades-tested basis, the strongest results in
+this entire repo.** Both cleared PF > 1 in both independent 2-3 year
+windows on ~900 trades each (order of magnitude more trades than the
+trend-following system, comparable to the OR sweep/breakout's sample).
+IFVG's PF actually improved slightly out of sample after already looking
+good in-sample (1.46 -> 1.37, both strong); FVG's out-of-sample PF
+(1.51) was *better* than in-sample (1.03) - unusual, but the point of
+testing both windows is exactly to catch this kind of window-dependence
+either direction, and neither window was bad enough to worry about.
+**MSS did not hold up as an independent edge** - it flipped from
+losing (PF 0.89) to breakeven (PF 1.08), landing at essentially exactly
+1.00 combined (917 trades, -0.8R total) with a very large max drawdown
+(-78.5R) relative to that near-zero return - a losing/flat rather than
+winning confirmation type, and its drawdown-to-return ratio is the worst
+of anything tested here. Drop MSS as a standalone trigger; FVG and IFVG
+are the two worth taking seriously.
+
+Mechanically, this shares the sweep+CISD skeleton with `core_reversal.py`
+but is a materially different strategy: only 2 sweep sources instead of
+7, no 50% retracement stage (direct market entry the instant CISD + the
+second condition confirm), and a short `confirm_lookahead` window (6
+bars) rather than `core_reversal`'s much longer POI validity - a faster,
+more aggressive, higher-frequency version of the same idea, on a faster
+timeframe (M3 vs M5). That it does markedly better than `core_reversal.py`
+(which came out at PF~1.0, no edge) on the same underlying sweep+CISD
+concept is a genuinely interesting result in its own right - the
+retracement-wait and the wider sweep-source set may be diluting a real
+signal rather than refining it.
+
+Trade logs: `reports/sweepcisd_fvg_*.csv`, `reports/sweepcisd_ifvg_*.csv`,
+`reports/sweepcisd_mss_*.csv` (both windows each).
+
 ## Layout
 
 ```

@@ -240,6 +240,10 @@ cisdAnchorTol = input.float(0.0, "Tolérance d'ancrage (ATR)", minval = 0.0, ste
 // [C4] Choix de la bougie retenue comme OB de déplacement.
 obSource = input.string("Dernière bougie opposée avant le déplacement", "Order Block de déplacement", options = ["Dernière bougie opposée avant le déplacement", "Dernière bougie de la série (V2.5.4)"], group = gCISD, tooltip = "En mode persistant, le CISD peut se confirmer plusieurs bougies après l'armement du niveau.\n\nDernière bougie opposée avant le déplacement (recommandé) : l'OB est la bougie opposée la plus récente précédant la bougie qui confirme le CISD. C'est la définition de la séquence écrite.\n\nDernière bougie de la série (V2.5.4) : l'OB reste figé à la bougie d'armement, même si le CISD arrive 8 bougies plus tard. Conservé pour reproduire les backtests V2.5.4.")
 
+gDirect = "5d · Entrée directe (sweep + CISD + FVG/IFVG, sans retracement)"
+directEntryEnabled = input.bool(true, "Activer l'entrée directe", group = gDirect, tooltip = "Additif : ne modifie aucune des routes existantes (Reversal 50 %, ALT, Continuation, OR+FVG), qui restent inchangées et peuvent toujours produire leur propre GO.\n\nQuand une zone POI (IFVG ou FVG directionnel selon le réglage du groupe « 3 · POI ») se forme juste après un CISD accepté, cette route déclenche un GO immédiatement, au marché, sans attendre le retour de prix à 50 % du POI. C'est la séquence mesurée en backtest : sweep Asia/Londres -> CISD persistant -> FVG ou IFVG -> entrée directe, sans la case d'attente qui, mesurée séparément, diluait le signal plutôt que de l'affiner.\n\nStop et cible calculés exactement comme la route Reversal (extrême du sweep ± ATR, liquidité externe la plus proche ≥ RR minimum), mais ancrés sur le prix de clôture de la bougie de déclenchement plutôt que sur le niveau à 50 %.")
+directRequireAsiaLon = input.bool(true, "Sweep limité à Asie + Londres", group = gDirect, tooltip = "Activé (mesuré en backtest) : n'accepte cette route que si le sweep qui a ouvert la séquence provient d'Asie ou de Londres (sSweepSource / lSweepSource contient « ASIA » ou « LON »), même si d'autres sources de sweep sont actives dans le groupe « 2 · Sweep of Liquidity ».\n\nDésactivé : accepte la route sur n'importe quelle source de sweep active (PDH/PDL, OR, M15...).")
+
 gAlt = "5b · Route additive SMT / CISD / MSS"
 altEnabled = input.bool(true, "Activer la route additive", group = gAlt)
 altConfirmBars = input.int(12, "Délai max entre confirmations (M5)", minval = 1, maxval = 48, group = gAlt)
@@ -2244,6 +2248,14 @@ var float lTp1 = na
 var float lTp2 = na
 var float lLiquidity = na
 
+// [Entrée directe] état séparé : ne touche jamais lLimit/lStop/lTp1/lTp2/lLiquidity.
+var float lDirectEntry = na
+var float lDirectStop = na
+var float lDirectTp1 = na
+var float lDirectTp2 = na
+var float lDirectLiquidity = na
+var int lDirectBar = na
+
 var int sStage = 0
 var int sSweepBar = na
 var float sSweepExtreme = na
@@ -2259,6 +2271,14 @@ var float sStop = na
 var float sTp1 = na
 var float sTp2 = na
 var float sLiquidity = na
+
+// [Entrée directe] état séparé, symétrique du bloc Long ci-dessus.
+var float sDirectEntry = na
+var float sDirectStop = na
+var float sDirectTp1 = na
+var float sDirectTp2 = na
+var float sDirectLiquidity = na
+var int sDirectBar = na
 
 // Route additive : deux confirmations distinctes parmi SMT, CISD et MSS.
 // 0 = collecte, 1 = confirmations acquises / attente POI,
@@ -2643,6 +2663,8 @@ if confirmed and altEnabled
 
 newLongPlan = false
 newShortPlan = false
+newLongDirectPlan = false
+newShortDirectPlan = false
 float stopBuffer = slBufTicks * syminfo.mintick
 if lStage == 3 and na(lLimit)
     // [V2.5.10] Long : le prix descend dans la zone, le premier contact est le HAUT.
@@ -2691,6 +2713,25 @@ if lStage == 3 and na(lLimit)
         // attente d'un nouveau POI au lieu de détruire toute la séquence.
         lStage := keepSeqOnReject ? 2 : 0
 
+    // [Entrée directe] Bloc additif, indépendant des gates ci-dessus (qui
+    // décident seulement de lLimit/newLongPlan). Réutilise le stop déjà
+    // calculé (extrême du sweep ± ATR) mais ancre l'entrée et la cible sur
+    // la clôture de la bougie qui vient de former le POI, au lieu d'attendre
+    // le retour à 50 %. N'écrit jamais lLimit/lStop/lTp1/lTp2/lLiquidity.
+    bool directSourceOkLong = not directRequireAsiaLon or str.contains(lSweepSource, "ASIA") or str.contains(lSweepSource, "LON")
+    if directEntryEnabled and directSourceOkLong
+        float directStopLong = candidateStopLong
+        if directStopLong < close
+            float directRiskLong = close - directStopLong
+            float directLiqLong = f_closestAbove(close, directStopLong, minRR, pdh, coreAsiaHigh, coreLonHigh, coreOrHigh, m15SwingHigh, pwh, h1RangeHigh)
+            lDirectEntry := close
+            lDirectStop := directStopLong
+            lDirectTp1 := close + tp1R * directRiskLong
+            lDirectTp2 := close + minRR * directRiskLong
+            lDirectLiquidity := na(directLiqLong) ? lDirectTp2 : directLiqLong
+            lDirectBar := bar_index
+            newLongDirectPlan := true
+
 if sStage == 3 and na(sLimit)
     // [V2.5.10] Short : le prix monte dans la zone, le premier contact est le BAS.
     float candidateLimitShort = sPoiBot + (poiEntryPct / 100.0) * (sPoiTop - sPoiBot)
@@ -2721,6 +2762,22 @@ if sStage == 3 and na(sLimit)
         lastRejectReason := not biasOkShort ? "Biais H1/Direction" : not h4OkShort ? "Veto H4" : not h1RangeUsableShort ? "Range H1 indisponible" : not pdOkShort ? "POI hors Premium" : not stopGeometryOkShort ? "POI au-dessus du stop" : not liquidityFoundShort ? "Pas de liquidité ≥ RR" : "Liquidité cible déjà prise"
         // [CORRECTIF C3] Idem côté short.
         sStage := keepSeqOnReject ? 2 : 0
+
+    // [Entrée directe] Symétrique du bloc Long : additif, n'écrit jamais
+    // sLimit/sStop/sTp1/sTp2/sLiquidity.
+    bool directSourceOkShort = not directRequireAsiaLon or str.contains(sSweepSource, "ASIA") or str.contains(sSweepSource, "LON")
+    if directEntryEnabled and directSourceOkShort
+        float directStopShort = candidateStopShort
+        if close < directStopShort
+            float directRiskShort = directStopShort - close
+            float directLiqShort = f_closestBelow(close, directStopShort, minRR, pdl, coreAsiaLow, coreLonLow, coreOrLow, m15SwingLow, pwl, h1RangeLow)
+            sDirectEntry := close
+            sDirectStop := directStopShort
+            sDirectTp1 := close - tp1R * directRiskShort
+            sDirectTp2 := close - minRR * directRiskShort
+            sDirectLiquidity := na(directLiqShort) ? sDirectTp2 : directLiqShort
+            sDirectBar := bar_index
+            newShortDirectPlan := true
 
 // Un plan en attente ne garde pas un ancien feu vert après une nouvelle
 // cassure H1 opposée, une sortie de zone P/D ou un changement du veto H4.
@@ -3427,7 +3484,12 @@ altGoLong = altGoLongCandidate and not oppositeEngineConflict
 altGoShort = altGoShortCandidate and not oppositeEngineConflict
 contGoLong = contGoLongCandidate and not anyCoreGoCandidate and not oppositeEngineConflict
 contGoShort = contGoShortCandidate and not anyCoreGoCandidate and not oppositeEngineConflict
-go = goLong or goShort or altGoLong or altGoShort or contGoLong or contGoShort
+// [Entrée directe] Route entièrement indépendante : ne participe pas à
+// l'arbitrage Reversal/ALT/Continuation ci-dessus (oppositeEngineConflict,
+// anyCoreGoCandidate...), pour ne rien changer au comportement existant.
+directGoLong = newLongDirectPlan
+directGoShort = newShortDirectPlan
+go = goLong or goShort or altGoLong or altGoShort or contGoLong or contGoShort or directGoLong or directGoShort
 
 if oppositeEngineConflict
     lStage := 0
@@ -3600,9 +3662,28 @@ f_hline(useMainLevels, activeTp1Px,   color.new(#ff9800, 0), "TP1", line.style_d
 f_hline(useMainLevels, activeTp2Px,   color.new(#26a69a, 0), "TP2", line.style_dashed, 3)
 f_hline(useMainLevels, activeTp3Px,   color.new(#ab47bc, 0), "LIQ", line.style_dotted, 4)
 
+// [Entrée directe] Bloc additif : affichage des niveaux de la route directe,
+// indépendant des groupes REV/ALT ci-dessus (slots 5-8 / 9-12 pour ne
+// jamais partager la position horizontale des textes avec useMainLevels /
+// useAltLongLevels / useAltShortLevels). Reste visible pendant `lineExt`
+// bougies après le déclenchement (même réglage que l'extension des autres
+// lignes), puis disparaît de lui-même.
+bool useDirectLongLevels = showTrade and not na(lDirectEntry) and (bar_index - lDirectBar <= lineExt)
+bool useDirectShortLevels = showTrade and not na(sDirectEntry) and (bar_index - sDirectBar <= lineExt)
+f_hline(useDirectLongLevels, lDirectEntry, color.new(#00bfa5, 0), "DIRECT L ENTRY", line.style_solid, 5)
+f_hline(useDirectLongLevels, lDirectStop, color.new(#ef5350, 0), "DIRECT L SL", line.style_solid, 6)
+f_hline(useDirectLongLevels, lDirectTp1, color.new(#ff9800, 0), "DIRECT L TP1", line.style_dashed, 7)
+f_hline(useDirectLongLevels, lDirectTp2, color.new(#26a69a, 0), "DIRECT L TP2", line.style_dashed, 8)
+f_hline(useDirectShortLevels, sDirectEntry, color.new(#d500f9, 0), "DIRECT S ENTRY", line.style_solid, 9)
+f_hline(useDirectShortLevels, sDirectStop, color.new(#ef5350, 0), "DIRECT S SL", line.style_solid, 10)
+f_hline(useDirectShortLevels, sDirectTp1, color.new(#ff9800, 0), "DIRECT S TP1", line.style_dashed, 11)
+f_hline(useDirectShortLevels, sDirectTp2, color.new(#26a69a, 0), "DIRECT S TP2", line.style_dashed, 12)
+
 bgcolor(sessOK ? color.new(#2962ff, 93) : inFlatCore ? color.new(#ef5350, 94) : na, title = "Fenêtre d'entrée / clôture")
 plotshape(goLong, title = "GO LONG strict", style = shape.triangleup, location = location.belowbar, color = color.new(#26a69a, 0), size = size.small, text = "GO")
 plotshape(goShort, title = "GO SHORT strict", style = shape.triangledown, location = location.abovebar, color = color.new(#ef5350, 0), size = size.small, text = "GO")
+plotshape(directGoLong, title = "GO LONG direct", style = shape.triangleup, location = location.belowbar, color = color.new(#00bfa5, 0), size = size.small, text = "GO-D")
+plotshape(directGoShort, title = "GO SHORT direct", style = shape.triangledown, location = location.abovebar, color = color.new(#d500f9, 0), size = size.small, text = "GO-D")
 plotshape(altGoLong and (showAltMarkers or not showEntryBar), title = "GO LONG route additive", style = shape.triangleup, location = location.belowbar, color = color.new(#7e57c2, 0), size = size.small, text = "ALT")
 plotshape(altGoShort and (showAltMarkers or not showEntryBar), title = "GO SHORT route additive", style = shape.triangledown, location = location.abovebar, color = color.new(#7e57c2, 0), size = size.small, text = "ALT")
 plotshape(contGoLong, title = "GO LONG Continuation", style = shape.triangleup, location = location.belowbar, color = color.new(#00acc1, 0), size = size.small, text = "CONT")
@@ -3746,6 +3827,8 @@ alertcondition(mssBullEvt, title = "MSS visuel haussier", message = "ICT : MSS/C
 alertcondition(mssBearEvt, title = "MSS visuel baissier", message = "ICT : MSS/CHOCH visuel baissier sur {{ticker}} {{interval}}")
 alertcondition(goLong, title = "GO LONG Reversal", message = "Checklist V2.5.10 : GO LONG Reversal sur {{ticker}} {{interval}}")
 alertcondition(goShort, title = "GO SHORT Reversal", message = "Checklist V2.5.10 : GO SHORT Reversal sur {{ticker}} {{interval}}")
+alertcondition(directGoLong, title = "GO LONG direct (sweep+CISD+FVG/IFVG)", message = "Entrée directe LONG (sweep+CISD+FVG/IFVG, sans retracement) sur {{ticker}} {{interval}}")
+alertcondition(directGoShort, title = "GO SHORT direct (sweep+CISD+FVG/IFVG)", message = "Entrée directe SHORT (sweep+CISD+FVG/IFVG, sans retracement) sur {{ticker}} {{interval}}")
 alertcondition(altGoLong, title = "GO LONG Route additive", message = "ICT V2.6.0 : GO LONG route SMT/CISD/MSS sur {{ticker}} {{interval}}")
 alertcondition(altGoShort, title = "GO SHORT Route additive", message = "ICT V2.6.0 : GO SHORT route SMT/CISD/MSS sur {{ticker}} {{interval}}")
 alertcondition(contNewBreak, title = "Continuation · cassure M5", message = "Checklist V2.5.10 : cassure M5 de continuation, attente FVG frais sur {{ticker}} {{interval}}")

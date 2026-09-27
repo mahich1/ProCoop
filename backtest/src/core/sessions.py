@@ -59,6 +59,9 @@ def session_high_low(df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
             "low_ts": lo_ts,
         })
     res = pd.DataFrame(out).set_index("date")
+    res.index = pd.to_datetime(res.index)  # tz-naive Timestamp, not raw date objects -
+    # callers look this up with pd.Timestamp(ts.date()), which never matches a plain
+    # datetime.date (different type, same day) even though `in` returns no error.
     return res
 
 

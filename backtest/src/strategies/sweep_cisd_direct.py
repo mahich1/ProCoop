@@ -1,10 +1,27 @@
-"""Asia/London liquidity sweep -> CISD -> {FVG | IFVG | MSS} -> DIRECT
-market entry (no retracement wait), on M3.
+"""Liquidity sweep -> CISD -> {FVG | IFVG | MSS} -> DIRECT market entry
+(no retracement wait), on M3.
 
-User's request: only the two "major liquidity" sources (Asia and London
-session H/L), not the full PDH/PDL/OR/M15 set core_reversal.py uses for
-its sweep stage. Three separate confirmation modes for the second
-condition after CISD - test each independently:
+Originally built for the user's two "major liquidity" sources (Asia and
+London session H/L) - see README.md, the strongest result in this repo
+(FVG/IFVG both PF > 1 in both windows). This module now also supports
+the other sweep sources the live Pine indicator exposes as independent
+toggles (PDH/PDL, the finalised NY Opening Range, and the M15 swing
+high/low), so each can be tested standalone with the exact same
+CISD -> POI -> direct-entry skeleton, to see whether the edge is
+specific to Asia/London or generalises to the indicator's other sources.
+
+`sweep_sources` selects which level(s) can ARM the sequence (stage 1) -
+default stays `("asia", "lon")`, byte-identical to the original,
+already-validated test. PDH/PDL are always included in the opposite-side
+liquidity TARGET search regardless of `sweep_sources` (matching the Pine
+engine and the original code, where PD levels are always valid take-
+profit liquidity even though `usePdSweep` only gates whether they can
+trigger a sweep); OR and M15 are added to the target search only when
+they are themselves an enabled sweep source, so the default Asia+London
+config's results are unchanged from before this refactor.
+
+Three separate confirmation modes for the second condition after CISD -
+test each independently:
   - "fvg":  a fresh directional FVG completes on/after the CISD bar.
   - "ifvg": an IFVG (inverted FVG) fires in the trade direction.
   - "mss":  price closes beyond the minor swing formed since the sweep
@@ -23,8 +40,12 @@ import pandas as pd
 from ..core import sessions
 from ..core.cisd import run_cisd_persistent
 from ..core.ifvg import run_ifvg
+from ..core.resample import to_timeframe
 from ..core.structure import atr as calc_atr
-from ..core.structure import fair_value_gaps
+from ..core.structure import fair_value_gaps, pivot_highs_lows
+
+SweepSource = Literal["pdh_pdl", "asia", "lon", "or", "m15"]
+ALL_SWEEP_SOURCES: tuple[SweepSource, ...] = ("pdh_pdl", "asia", "lon", "or", "m15")
 
 
 @dataclass
@@ -56,10 +77,38 @@ class _Freshness:
         return was_fresh
 
 
+def _closest_above(entry: float, min_dist: float, candidates: list[float]) -> float:
+    above = [c for c in candidates if not np.isnan(c) and c - entry >= min_dist]
+    return min(above) if above else np.nan
+
+
+def _closest_below(entry: float, min_dist: float, candidates: list[float]) -> float:
+    below = [c for c in candidates if not np.isnan(c) and entry - c >= min_dist]
+    return max(below) if below else np.nan
+
+
+def _m15_swings(m3: pd.DataFrame, pivot_len: int = 2) -> tuple[np.ndarray, np.ndarray]:
+    """Confirmed M15 swing high/low, forward-filled onto m3's index from
+    each swing's own confirmation timestamp - no look-ahead."""
+    m15 = to_timeframe(m3, "15min")
+    piv = pivot_highs_lows(m15, pivot_len, pivot_len)
+    conf_hi = piv.dropna(subset=["pivot_high"])["ph_confirmed_at"]
+    conf_lo = piv.dropna(subset=["pivot_low"])["pl_confirmed_at"]
+    vals_hi = piv.dropna(subset=["pivot_high"])["pivot_high"]
+    vals_lo = piv.dropna(subset=["pivot_low"])["pivot_low"]
+    s_hi = pd.Series(vals_hi.to_numpy(), index=conf_hi.to_numpy()).sort_index()
+    s_lo = pd.Series(vals_lo.to_numpy(), index=conf_lo.to_numpy()).sort_index()
+    hi = s_hi.reindex(m3.index.union(s_hi.index)).ffill().reindex(m3.index)
+    lo = s_lo.reindex(m3.index.union(s_lo.index)).ffill().reindex(m3.index)
+    return hi.to_numpy(), lo.to_numpy()
+
+
 def generate_signals(m3: pd.DataFrame, poi_mode: Literal["fvg", "ifvg", "mss"] = "fvg",
+                      sweep_sources: tuple[SweepSource, ...] = ("asia", "lon"),
                       sweep_capture=("00:00", "16:00"), cisd_keep_age: int = 30,
                       confirm_lookahead: int = 6, sl_buffer_pct_atr: float = 0.1,
-                      min_rr: float = 1.5, max_sweep_age: int = 60) -> list[Signal]:
+                      min_rr: float = 1.5, max_sweep_age: int = 60,
+                      m15_pivot_len: int = 2) -> list[Signal]:
     n = len(m3)
     high = m3["high"].to_numpy()
     low = m3["low"].to_numpy()
@@ -71,6 +120,8 @@ def generate_signals(m3: pd.DataFrame, poi_mode: Literal["fvg", "ifvg", "mss"] =
     pdh_pdl = sessions.previous_day_high_low(m3)
     asia = sessions.session_high_low(m3, *sessions.ASIA_SESSION)
     london = sessions.session_high_low(m3, *sessions.LONDON_SESSION)
+    orng = sessions.session_high_low(m3, *sessions.OR_WINDOW)
+    m15_hi_arr, m15_lo_arr = _m15_swings(m3, m15_pivot_len)
 
     cisd_events = run_cisd_persistent(m3, cisd_keep_age)
     fvg = fair_value_gaps(m3) if poi_mode == "fvg" else None
@@ -79,8 +130,9 @@ def generate_signals(m3: pd.DataFrame, poi_mode: Literal["fvg", "ifvg", "mss"] =
     hm = idx.strftime("%H:%M")
     in_capture = (hm >= sweep_capture[0]) & (hm < sweep_capture[1])
 
-    fresh = {"asia_lo": _Freshness(), "asia_hi": _Freshness(),
-             "lon_lo": _Freshness(), "lon_hi": _Freshness()}
+    fresh = {name: _Freshness() for name in
+             ["pdl", "pdh", "asia_lo", "asia_hi", "lon_lo", "lon_hi",
+              "or_lo", "or_hi", "m15_lo", "m15_hi"]}
 
     signals: list[Signal] = []
 
@@ -97,13 +149,16 @@ def generate_signals(m3: pd.DataFrame, poi_mode: Literal["fvg", "ifvg", "mss"] =
         l_hi = l_lo = np.nan
         if d in london.index and idx[i].strftime("%H:%M") >= sessions.LONDON_SESSION[1]:
             l_hi, l_lo = london.loc[d, "high"], london.loc[d, "low"]
-        return pdl, pdh, a_hi, a_lo, l_hi, l_lo
+        o_hi = o_lo = np.nan
+        if d in orng.index and idx[i].strftime("%H:%M") >= sessions.OR_WINDOW[1]:
+            o_hi, o_lo = orng.loc[d, "high"], orng.loc[d, "low"]
+        return pdl, pdh, a_hi, a_lo, l_hi, l_lo, o_hi, o_lo
 
     for i in range(30, n - 1):
-        ts = idx[i]
         bar_high, bar_low, bar_close = high[i], low[i], close[i]
         prev_low, prev_high = low[i - 1], high[i - 1]
-        pdl, pdh, a_hi, a_lo, l_hi, l_lo = day_levels(i)
+        pdl, pdh, a_hi, a_lo, l_hi, l_lo, o_hi, o_lo = day_levels(i)
+        m15h, m15l = m15_hi_arr[i], m15_lo_arr[i]
 
         def sell_sweep(name, level):
             fr = fresh[name].check(level, False, bar_high, bar_low)
@@ -113,10 +168,17 @@ def generate_signals(m3: pd.DataFrame, poi_mode: Literal["fvg", "ifvg", "mss"] =
             fr = fresh[name].check(level, True, bar_high, bar_low)
             return fr and (not np.isnan(level)) and bar_high > level and bar_close < level and prev_high <= level
 
-        sell_hit = next(((nm, lv) for nm, lv in [("AsiaLow", a_lo), ("LonLow", l_lo)]
-                          if sell_sweep("asia_lo" if nm == "AsiaLow" else "lon_lo", lv)), None)
-        buy_hit = next(((nm, lv) for nm, lv in [("AsiaHigh", a_hi), ("LonHigh", l_hi)]
-                        if buy_sweep("asia_hi" if nm == "AsiaHigh" else "lon_hi", lv)), None)
+        sell_pool = {"pdh_pdl": ("PDL", pdl, "pdl"), "asia": ("AsiaLow", a_lo, "asia_lo"),
+                     "lon": ("LonLow", l_lo, "lon_lo"), "or": ("OrLow", o_lo, "or_lo"),
+                     "m15": ("M15Low", m15l, "m15_lo")}
+        buy_pool = {"pdh_pdl": ("PDH", pdh, "pdh"), "asia": ("AsiaHigh", a_hi, "asia_hi"),
+                    "lon": ("LonHigh", l_hi, "lon_hi"), "or": ("OrHigh", o_hi, "or_hi"),
+                    "m15": ("M15High", m15h, "m15_hi")}
+
+        sell_hit = next(((nm, lv) for src in sweep_sources
+                          for nm, lv, fkey in [sell_pool[src]] if sell_sweep(fkey, lv)), None)
+        buy_hit = next(((nm, lv) for src in sweep_sources
+                         for nm, lv, fkey in [buy_pool[src]] if buy_sweep(fkey, lv)), None)
 
         if in_capture[i]:
             if sell_hit is not None:
@@ -179,16 +241,27 @@ def generate_signals(m3: pd.DataFrame, poi_mode: Literal["fvg", "ifvg", "mss"] =
                 state["stage"] = 0
                 continue
 
-            opposite = pdh if direction > 0 else pdl
-            candidates = [pdh, a_hi, l_hi] if direction > 0 else [pdl, a_lo, l_lo]
-            candidates = [c for c in candidates if not np.isnan(c) and direction * (c - entry) >= min_rr * risk]
-            target = (min(candidates) if direction > 0 else max(candidates)) if candidates \
-                else entry + direction * min_rr * risk
+            if direction > 0:
+                candidates = [pdh, a_hi, l_hi]
+                if "or" in sweep_sources:
+                    candidates.append(o_hi)
+                if "m15" in sweep_sources:
+                    candidates.append(m15h)
+                target = _closest_above(entry, min_rr * risk, candidates)
+            else:
+                candidates = [pdl, a_lo, l_lo]
+                if "or" in sweep_sources:
+                    candidates.append(o_lo)
+                if "m15" in sweep_sources:
+                    candidates.append(m15l)
+                target = _closest_below(entry, min_rr * risk, candidates)
+            target = target if not np.isnan(target) else entry + direction * min_rr * risk
 
             signals.append(Signal(
                 strategy=f"SweepCISD_{poi_mode.upper()}", direction=direction, ts_signal=idx[i],
                 entry=entry, stop=stop, target=target, max_entry_age_bars=1,
-                meta={"sweep_name": state.get("sweep_name", ""), "poi_mode": poi_mode},
+                meta={"sweep_name": state.get("sweep_name", ""), "poi_mode": poi_mode,
+                      "sweep_sources": ",".join(sweep_sources)},
             ))
             state["stage"] = 0
 

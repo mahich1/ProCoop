@@ -241,8 +241,17 @@ cisdAnchorTol = input.float(0.0, "Tolérance d'ancrage (ATR)", minval = 0.0, ste
 obSource = input.string("Dernière bougie opposée avant le déplacement", "Order Block de déplacement", options = ["Dernière bougie opposée avant le déplacement", "Dernière bougie de la série (V2.5.4)"], group = gCISD, tooltip = "En mode persistant, le CISD peut se confirmer plusieurs bougies après l'armement du niveau.\n\nDernière bougie opposée avant le déplacement (recommandé) : l'OB est la bougie opposée la plus récente précédant la bougie qui confirme le CISD. C'est la définition de la séquence écrite.\n\nDernière bougie de la série (V2.5.4) : l'OB reste figé à la bougie d'armement, même si le CISD arrive 8 bougies plus tard. Conservé pour reproduire les backtests V2.5.4.")
 
 gDirect = "5d · Entrée directe (sweep + CISD + FVG/IFVG, sans retracement)"
-directEntryEnabled = input.bool(true, "Activer l'entrée directe", group = gDirect, tooltip = "Additif : ne modifie aucune des routes existantes (Reversal 50 %, ALT, Continuation, OR+FVG), qui restent inchangées et peuvent toujours produire leur propre GO.\n\nQuand une zone POI (IFVG ou FVG directionnel selon le réglage du groupe « 3 · POI ») se forme juste après un CISD accepté, cette route déclenche un GO immédiatement, au marché, sans attendre le retour de prix à 50 % du POI. C'est la séquence mesurée en backtest : sweep Asia/Londres -> CISD persistant -> FVG ou IFVG -> entrée directe, sans la case d'attente qui, mesurée séparément, diluait le signal plutôt que de l'affiner.\n\nStop et cible calculés exactement comme la route Reversal (extrême du sweep ± ATR, liquidité externe la plus proche ≥ RR minimum), mais ancrés sur le prix de clôture de la bougie de déclenchement plutôt que sur le niveau à 50 %.")
-directRequireAsiaLon = input.bool(true, "Sweep limité à Asie + Londres", group = gDirect, tooltip = "Activé (mesuré en backtest) : n'accepte cette route que si le sweep qui a ouvert la séquence provient d'Asie ou de Londres (sSweepSource / lSweepSource contient « ASIA » ou « LON »), même si d'autres sources de sweep sont actives dans le groupe « 2 · Sweep of Liquidity ».\n\nDésactivé : accepte la route sur n'importe quelle source de sweep active (PDH/PDL, OR, M15...).")
+directEntryEnabled = input.bool(true, "Activer l'entrée directe", group = gDirect, tooltip = "Additif : ne modifie aucune des routes existantes (Reversal 50 %, ALT, Continuation, OR+FVG), qui restent inchangées et peuvent toujours produire leur propre GO.\n\nQuand une zone POI (IFVG ou FVG directionnel selon le réglage du groupe « 3 · POI ») se forme juste après un CISD accepté, sur une des sources de sweep cochées ci-dessous, cette route déclenche un GO immédiatement, au marché, sans attendre le retour de prix à 50 % du POI. C'est la séquence mesurée en backtest : sweep -> CISD persistant -> FVG ou IFVG -> entrée directe, sans la case d'attente qui, mesurée séparément, diluait le signal plutôt que de l'affiner. Testé indépendamment sur 5 sources de sweep (Asie, Londres, ORH/ORL, swing M15, PDH/PDL) - voir le détail et les valeurs par défaut de chaque interrupteur ci-dessous.\n\nStop et cible calculés exactement comme la route Reversal (extrême du sweep ± ATR, liquidité externe la plus proche ≥ RR minimum), mais ancrés sur le prix de clôture de la bougie de déclenchement plutôt que sur le niveau à 50 %.")
+// [Entrée directe] Un interrupteur par source de sweep, mesuré indépendamment
+// en backtest (voir README du repo de backtest, section « sweep-source
+// generalization ») - remplace l'ancien tout-ou-rien Asie+Londres uniquement.
+// PWL/PWH (hebdo) et H1 ne sont pas proposés ici : jamais testés pour cette
+// route, donc pas de valeur par défaut fiable à leur donner.
+directAllowPdSweep = input.bool(false, "Autoriser sweep PDH/PDL", group = gDirect, tooltip = "Mesuré en backtest : ne généralise PAS l'edge - PF hors-échantillon ≈ 0,96 dans les deux modes POI (FVG et IFVG), aucun ne dépasse 1,0 de façon fiable. Désactivé par défaut ; à activer seulement si vous voulez le re-tester vous-même.")
+directAllowAsiaSweep = input.bool(true, "Autoriser sweep Asie", group = gDirect, tooltip = "Source d'origine de cette route, mesurée en backtest : PF combiné FVG 1,30 / IFVG 1,41 sur ~900 trades chacun.")
+directAllowLonSweep = input.bool(true, "Autoriser sweep Londres", group = gDirect, tooltip = "Source d'origine de cette route, mesurée avec Asie (voir ci-dessus) - les deux sont testées ensemble, pas isolément l'une de l'autre.")
+directAllowOrSweep = input.bool(true, "Autoriser sweep ORH/ORL finalisé", group = gDirect, tooltip = "Mesuré en backtest : le résultat le plus STABLE du repo - PF 1,62 dans les deux fenêtres testées (mode FVG), sans aucune dérive entre in-sample et out-of-sample.")
+directAllowM15Sweep = input.bool(true, "Autoriser sweep swing M15", group = gDirect, tooltip = "Mesuré en backtest : le MEILLEUR résultat du repo, toutes stratégies confondues - PF (mode IFVG) 1,62 in-sample -> 1,74 out-of-sample, +1211R combinés sur ~2900 trades (3x plus que Asie+Londres).")
 
 gAlt = "5b · Route additive SMT / CISD / MSS"
 altEnabled = input.bool(true, "Activer la route additive", group = gAlt)
@@ -2718,7 +2727,7 @@ if lStage == 3 and na(lLimit)
     // calculé (extrême du sweep ± ATR) mais ancre l'entrée et la cible sur
     // la clôture de la bougie qui vient de former le POI, au lieu d'attendre
     // le retour à 50 %. N'écrit jamais lLimit/lStop/lTp1/lTp2/lLiquidity.
-    bool directSourceOkLong = not directRequireAsiaLon or str.contains(lSweepSource, "ASIA") or str.contains(lSweepSource, "LON")
+    bool directSourceOkLong = (directAllowPdSweep and str.contains(lSweepSource, "PD")) or (directAllowAsiaSweep and str.contains(lSweepSource, "ASIA")) or (directAllowLonSweep and str.contains(lSweepSource, "LON")) or (directAllowOrSweep and str.contains(lSweepSource, "OR")) or (directAllowM15Sweep and str.contains(lSweepSource, "M15"))
     if directEntryEnabled and directSourceOkLong
         float directStopLong = candidateStopLong
         if directStopLong < close
@@ -2765,7 +2774,7 @@ if sStage == 3 and na(sLimit)
 
     // [Entrée directe] Symétrique du bloc Long : additif, n'écrit jamais
     // sLimit/sStop/sTp1/sTp2/sLiquidity.
-    bool directSourceOkShort = not directRequireAsiaLon or str.contains(sSweepSource, "ASIA") or str.contains(sSweepSource, "LON")
+    bool directSourceOkShort = (directAllowPdSweep and str.contains(sSweepSource, "PD")) or (directAllowAsiaSweep and str.contains(sSweepSource, "ASIA")) or (directAllowLonSweep and str.contains(sSweepSource, "LON")) or (directAllowOrSweep and str.contains(sSweepSource, "OR")) or (directAllowM15Sweep and str.contains(sSweepSource, "M15"))
     if directEntryEnabled and directSourceOkShort
         float directStopShort = candidateStopShort
         if close < directStopShort

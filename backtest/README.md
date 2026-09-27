@@ -646,16 +646,17 @@ Trade logs: `reports/sweepcisd_fvg_*.csv`, `reports/sweepcisd_ifvg_*.csv`,
 
 ## Does the sweep+CISD+FVG/IFVG edge generalise to the indicator's other sweep sources? (`experiments/sweep_source_check.py`)
 
-The Asia/London result above only exercises 2 of the 6 sweep-source
+The Asia/London result above only exercises 2 of the 7 sweep-source
 toggles the live indicator ships (`usePdSweep`, `useAsiaSweep`,
-`useLonSweep`, `useOrSweep`, `useM15Sweep` default on; `useH1Sweep`
-default off). `sweep_cisd_direct.py` was generalised (new
+`useLonSweep`, `useOrSweep`, `useM15Sweep` default on; `useWeeklySweep`,
+`useH1Sweep` default off). `sweep_cisd_direct.py` was generalised (new
 `sweep_sources` parameter, default unchanged so the Asia+London numbers
 above are untouched) to test the identical CISD -> POI -> direct-entry
 recipe - same tuning, nothing re-optimised per source - standalone
-against PDH/PDL, the finalised NY Opening Range (09:30-09:45 NY), and
-the M15 swing high/low (pivot length 2, same as the indicator's
-`m15PivotLen` default), plus all 5 combined:
+against PDH/PDL, the finalised NY Opening Range (09:30-09:45 NY), the
+M15 swing high/low (pivot length 2, same as the indicator's
+`m15PivotLen` default), the previous completed week's high/low
+(PWH/PWL), and H1 "extremes", plus all 7 combined:
 
 | source | mode | in-sample PF | out-of-sample PF | combined n | combined PF | total R | max DD (R) |
 |---|---|---|---|---|---|---|---|
@@ -665,8 +666,26 @@ the M15 swing high/low (pivot length 2, same as the indicator's
 | OR (09:30-09:45) | IFVG | 1.29 | **1.80** | 485 | 1.58 | +144.8R | -15.2R |
 | **M15 swing** | FVG | 1.59 | 1.39 | 2997 | 1.47 | +867.9R | -35.1R |
 | **M15 swing** | **IFVG** | 1.62 | **1.74** | 2918 | **1.69** | **+1211.7R** | -22.8R |
-| All 5 combined | FVG | 1.31 | 1.38 | 4005 | 1.35 | +873.4R | -29.8R |
-| All 5 combined | IFVG | 1.52 | 1.46 | 3872 | 1.48 | +1135.3R | -37.5R |
+| PWH/PWL (weekly) | FVG | 2.06 | 1.65 | **57** | 1.79 | +27.0R | -6.0R |
+| PWH/PWL (weekly) | IFVG | 0.87 | 1.23 | **65** | 1.08 | +3.5R | -11.0R |
+| H1 extremes (approx.) | FVG | 1.17 | 1.65 | 838 | 1.45 | +238.7R | -23.1R |
+| H1 extremes (approx.) | IFVG | 1.22 | 1.25 | 809 | 1.23 | +120.5R | -51.8R |
+| All 5 (no PW/H1) combined | FVG | 1.31 | 1.38 | 4005 | 1.35 | +873.4R | -29.8R |
+| All 5 (no PW/H1) combined | IFVG | 1.52 | 1.46 | 3872 | 1.48 | +1135.3R | -37.5R |
+| All 7 combined | FVG | 1.32 | 1.34 | 4231 | 1.33 | +882.4R | -27.9R |
+| All 7 combined | IFVG | 1.41 | 1.39 | 4095 | 1.40 | +1010.7R | -38.3R |
+
+**Fidelity caveat on H1**: the indicator's real H1 sweep level
+(`h1SweepHigh`/`h1SweepLow`) is `h1RangeHigh[1]`/`h1RangeLow[1]`, the
+extreme of a BOS-confirmed structural dealing range (`f_coreStructure`,
+~110 lines of stateful Pine tracking a directional leg confirmed by a
+break of structure, with a swing-pair bootstrap fallback) - that engine
+is *not* ported here. "H1 extremes" above approximates it with a plain
+H1 swing pivot (the same mechanism as M15, just resampled to 60min).
+Read it as directional evidence about H1-timeframe levels in general,
+not as a literal replay of the indicator's own H1 sweep. Every other
+row, PW included, is a faithful port of the level the indicator
+actually computes.
 
 **The edge is not source-agnostic - it depends heavily on which level is
 swept:**
@@ -681,27 +700,39 @@ swept:**
   result in this repo by total R and trade count: PF actually improved
   out-of-sample (1.62 -> 1.74) on nearly 3,000 trades (~3x the
   Asia+London sample), for +1,211.7R combined.
-- **Combining all 5 sources is worse than M15 or OR alone** (PF 1.35 /
-  1.48 vs. M15's 1.47 / 1.69) - PDH/PDL's weak, inconsistent
-  contribution dilutes the two sources that actually carry an edge,
-  the same "wider source set dilutes a real signal" pattern already
-  seen when comparing this direct-entry engine to `core_reversal.py`'s
-  full 7-source sweep.
+- **PWH/PWL's headline PF is the highest in the table (FVG: 1.79
+  combined) but on only 57-65 trades over 5 years** - a weekly level
+  only produces one sweep opportunity per side per week, so this is far
+  too thin a sample to trust either way; a handful of large winners can
+  swing a PF this much. IFVG on the same source is inconsistent (0.87 ->
+  1.23). Treat this as "not enough data yet," not as a confirmed edge.
+- **H1 extremes (approximated) look usable in FVG mode** (PF 1.17 ->
+  1.65, 838 trades, +238.7R) but noticeably weaker and riskier in IFVG
+  mode (PF ~1.2 in both windows, -51.8R max drawdown against only
+  +120.5R total - the worst drawdown-to-return ratio of any source
+  tested), on top of the fidelity caveat above.
+- **Combining more sources keeps diluting, not adding.** All-5 (PF 1.35
+  / 1.48) already beat All-7 (PF 1.33 / 1.40, adding PW+H1) - PDH/PDL,
+  PW's thin sample, and H1's IFVG drawdown all drag on the two sources
+  that actually carry the edge (OR, M15), the same "wider source set
+  dilutes a real signal" pattern already seen comparing this
+  direct-entry engine to `core_reversal.py`'s full 7-source sweep.
 
 **Bottom line: if extending the indicator's direct-entry route beyond
-Asia/London, add M15 swing and/or OR, not PDH/PDL.** M15/IFVG and
-OR/FVG are, on this evidence, better candidates than the original
-Asia+London config, not just additional confirmation of it.
+Asia/London, add M15 swing and/or OR - stop there.** PDH/PDL, PW, and H1
+each carry their own specific reason not to flip on by default (no
+generalization, too little data, and an unported/riskier mechanism,
+respectively) even though none of the three is a flat "it loses money."
 
 One caveat carried over from `structure.py`'s pivot detector (not
-introduced by this test): a confirmed M15 swing is marked knowable at
-the *open* timestamp of the bar `m15PivotLen` bars later rather than
-its close, a few minutes of look-ahead on a signal that persists for
-hours - consistent with the Pine indicator's own M15 security call,
-which explicitly uses `lookahead = barmerge.lookahead_on`. Negligible
-at this scale, but worth knowing if M15 swing timing is ever tightened.
+introduced by this test): a confirmed M15/H1 swing is marked knowable at
+the *open* timestamp of the bar `pivot_len` bars later rather than its
+close, a few minutes of look-ahead on a signal that persists for hours -
+consistent with the Pine indicator's own M15/H1 security calls, which
+explicitly use `lookahead = barmerge.lookahead_on`. Negligible at this
+scale, but worth knowing if swing timing is ever tightened.
 
-Trade logs: `reports/sweepcisd_{pdh_pdl,or,m15,all5}_{fvg,ifvg}_*.csv`
+Trade logs: `reports/sweepcisd_{pdh_pdl,or,m15,pw,h1,all5,all7}_{fvg,ifvg}_*.csv`
 (both windows each), summary table in `reports/sweep_source_check_summary.csv`.
 
 ## Layout

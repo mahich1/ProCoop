@@ -509,6 +509,54 @@ same rules on ES/other correlated futures for cross-instrument
 consistency, and extend the backtest further back if more history is
 affordable, all before sizing any real risk behind it.
 
+## NY Opening Range sweep/breakout (`src/strategies/or_sweep_breakout.py`)
+
+User's model: build the 09:30-09:45 NY Opening Range, then from 09:45 to
+16:00 take the FIRST move on either side (ORH or ORL) - traded as a
+breakout continuation if the bar closes beyond the level, or a sweep
+fade if it wicks beyond and closes back inside. Max one trade/day, fixed
+2R target, entry at the next bar's open. (Building this also surfaced
+and fixed a real bug: `session_high_low`'s index used raw `datetime.date`
+objects instead of `Timestamp`, so every lookup against it silently
+failed - see the commit for which earlier strategies' Asia/London/OR
+sweep sources were quietly inert as a result; PDH/PDL/M15 still worked,
+so those strategies' no-edge conclusions stand.)
+
+| window | signals | win rate | PF | expectancy | total R | max DD | max consec. losses |
+|---|---|---|---|---|---|---|---|
+| 2023-2025 (in-sample) | 508 | 37.8% | 1.15 | +0.09R | +46.6R | -25.2R | 14 |
+| 2020-2023 (out-of-sample) | 763 | 38.5% | 1.19 | +0.12R | +90.3R | -27.1R | 10 |
+| **combined 2020-2025** | **1271** | **38.2%** | **1.18** | **+0.11R** | **+136.8R** | **-27.1R** | 14 |
+
+**PF didn't just survive out-of-sample, it held essentially flat (1.15
+-> 1.19)** - and this time on a genuinely large sample (1271 trades
+combined, roughly one a day), which is a different level of statistical
+weight than the 46-trade trend-following result. Broken down by type:
+
+| kind | in-sample PF | out-of-sample PF |
+|---|---|---|
+| breakout (close beyond ORH/ORL) | 1.23 | 1.25 |
+| sweep (wick beyond, close back inside) | 1.07 | 1.13 |
+
+The breakout half is the stronger, more consistent contributor in both
+windows; the sweep half is thinner but still > 1.0 both times, not the
+"looks fine then collapses" pattern every ICT setup showed. Recovery
+ratio (total return / max drawdown) is roughly 5:1, better than the
+trend-following system's ~3:1.
+
+**Caveats:** this fires close to once a day, every day - fine for
+statistical weight, but it means daily-loss-limit exposure is back on
+the table the way it wasn't for the once-a-week trend system (see the
+earlier risk-management discussion: at this trade frequency, sizing
+still needs to respect the daily cap, not just the total one). The 14
+max-consecutive-losses (in-sample) is real and will happen again. Only
+one exact rule set was tested (2R target, 2-tick-free stop placement at
+the opposite OR side / sweep wick) - deliberately, same reasoning as the
+trend system: no parameter search behind this result.
+
+Trade logs: `reports/or_sweep_breakout_2023-01-01_2025-01-01.csv` and
+`reports/or_sweep_breakout_2020-01-01_2023-01-01.csv`.
+
 ## Layout
 
 ```

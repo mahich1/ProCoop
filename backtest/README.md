@@ -557,6 +557,47 @@ trend system: no parameter search behind this result.
 Trade logs: `reports/or_sweep_breakout_2023-01-01_2025-01-01.csv` and
 `reports/or_sweep_breakout_2020-01-01_2023-01-01.csv`.
 
+## Combining trend-following + OR sweep/breakout (`experiments/combine_trend_and_or.py`)
+
+Both surviving strategies (trend_breakout, or_sweep_breakout), run as one
+portfolio: does diversification actually reduce risk, or just stack it?
+Reuses the saved trade logs, no re-backtest. Trend-following trades can
+stay open for days, so a day-by-day mark-to-market R path is
+reconstructed for them (D1 close vs. entry, divided by risk) rather than
+dumping the whole trade's R onto its exit date - that naive approach
+understates real combined drawdown, since an open position has its own
+daily floating P&L the whole time it's held. OR trades close same-day,
+so no reconstruction needed there.
+
+| | total R | max drawdown | worst single day |
+|---|---|---|---|
+| Trend-following alone | +13.1R | -6.2R | -3.0R |
+| OR sweep/breakout alone | +136.8R | -27.1R | -1.0R |
+| **Combined** | **+149.9R** | **-29.2R** | **-4.0R** |
+
+**Combining adds the returns but does not reduce the worst case - if
+anything the combined max drawdown is slightly worse than OR alone.**
+Daily correlation between the two is near zero in ordinary conditions
+(0.06), so on a typical day they really do behave independently. But the
+worst days are tail-correlated: the single worst combined day (-4.0R)
+was 2020-03-13, the depth of the COVID volatility shock, when
+trend-following's 2xATR stop got blown through by a huge one-day range
+(-3.0R alone) on the same day the OR range whipsawed (-1.0R). Extreme
+volatility breaks both systems' assumptions at once (a stop sized to
+recent ATR stops meaning anything once ATR itself explodes; an opening
+range becomes meaningless when the whole day is one giant range), so
+this isn't a coincidence - it's a shared structural weakness.
+
+**What this means for sizing a combined system:** don't budget for a
+combined bad day as if the two were independent (which would suggest
+something like sqrt(1^2+3^2)≈3.2R via naive diversification math) -
+budget for the observed worst case, roughly -4R in a single day, which
+has actually happened once in 5 years. The extra return from running
+both is real and the day-to-day diversification is real, but it doesn't
+buy protection against the specific scenario (extremely violent, fast
+markets) most likely to blow through a daily-loss limit on a challenge
+account.
+
 ## Layout
 
 ```

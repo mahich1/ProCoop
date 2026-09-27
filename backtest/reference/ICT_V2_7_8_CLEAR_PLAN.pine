@@ -245,13 +245,13 @@ directEntryEnabled = input.bool(true, "Activer l'entrée directe", group = gDire
 // [Entrée directe] Un interrupteur par source de sweep, mesuré indépendamment
 // en backtest (voir README du repo de backtest, section « sweep-source
 // generalization ») - remplace l'ancien tout-ou-rien Asie+Londres uniquement.
-// PWL/PWH (hebdo) et H1 ne sont pas proposés ici : jamais testés pour cette
-// route, donc pas de valeur par défaut fiable à leur donner.
 directAllowPdSweep = input.bool(false, "Autoriser sweep PDH/PDL", group = gDirect, tooltip = "Mesuré en backtest : ne généralise PAS l'edge - PF hors-échantillon ≈ 0,96 dans les deux modes POI (FVG et IFVG), aucun ne dépasse 1,0 de façon fiable. Désactivé par défaut ; à activer seulement si vous voulez le re-tester vous-même.")
 directAllowAsiaSweep = input.bool(true, "Autoriser sweep Asie", group = gDirect, tooltip = "Source d'origine de cette route, mesurée en backtest : PF combiné FVG 1,30 / IFVG 1,41 sur ~900 trades chacun.")
 directAllowLonSweep = input.bool(true, "Autoriser sweep Londres", group = gDirect, tooltip = "Source d'origine de cette route, mesurée avec Asie (voir ci-dessus) - les deux sont testées ensemble, pas isolément l'une de l'autre.")
 directAllowOrSweep = input.bool(true, "Autoriser sweep ORH/ORL finalisé", group = gDirect, tooltip = "Mesuré en backtest : le résultat le plus STABLE du repo - PF 1,62 dans les deux fenêtres testées (mode FVG), sans aucune dérive entre in-sample et out-of-sample.")
 directAllowM15Sweep = input.bool(true, "Autoriser sweep swing M15", group = gDirect, tooltip = "Mesuré en backtest : le MEILLEUR résultat du repo, toutes stratégies confondues - PF (mode IFVG) 1,62 in-sample -> 1,74 out-of-sample, +1211R combinés sur ~2900 trades (3x plus que Asie+Londres).")
+directAllowPwSweep = input.bool(true, "Autoriser sweep PWH/PWL (semaine précédente)", group = gDirect, tooltip = "Backtest en cours - chiffres à venir dans une prochaine mise à jour de ce fichier. Port fidèle du niveau réellement utilisé par l'indicateur (PWH/PWL = plus haut/plus bas de la semaine précédente complète), donc ce test mesure exactement ce que cette route ferait en direct sur cette source.")
+directAllowH1Sweep = input.bool(true, "Autoriser sweep extrêmes H1", group = gDirect, tooltip = "Backtest en cours - chiffres à venir dans une prochaine mise à jour de ce fichier.\n\nNote de fidélité : ce réglage filtre la même étiquette de sweep H1 déjà calculée par le moteur existant (h1SweepHigh/h1SweepLow, range de structure confirmée par BOS) - rien n'est changé dans SA détection. Seul le backtest Python utilisé pour mesurer ce chiffre approxime ce niveau H1 par un simple swing pivot (faute d'avoir porté le moteur de structure complet, ~110 lignes) : la mécanique réellement exécutée ici, dans Pine, reste fidèle à 100 % ; seule la mesure de performance de cette source est une approximation.")
 
 gAlt = "5b · Route additive SMT / CISD / MSS"
 altEnabled = input.bool(true, "Activer la route additive", group = gAlt)
@@ -2727,7 +2727,7 @@ if lStage == 3 and na(lLimit)
     // calculé (extrême du sweep ± ATR) mais ancre l'entrée et la cible sur
     // la clôture de la bougie qui vient de former le POI, au lieu d'attendre
     // le retour à 50 %. N'écrit jamais lLimit/lStop/lTp1/lTp2/lLiquidity.
-    bool directSourceOkLong = (directAllowPdSweep and str.contains(lSweepSource, "PD")) or (directAllowAsiaSweep and str.contains(lSweepSource, "ASIA")) or (directAllowLonSweep and str.contains(lSweepSource, "LON")) or (directAllowOrSweep and str.contains(lSweepSource, "OR")) or (directAllowM15Sweep and str.contains(lSweepSource, "M15"))
+    bool directSourceOkLong = (directAllowPdSweep and str.contains(lSweepSource, "PD")) or (directAllowAsiaSweep and str.contains(lSweepSource, "ASIA")) or (directAllowLonSweep and str.contains(lSweepSource, "LON")) or (directAllowOrSweep and str.contains(lSweepSource, "OR")) or (directAllowM15Sweep and str.contains(lSweepSource, "M15")) or (directAllowPwSweep and str.contains(lSweepSource, "PW")) or (directAllowH1Sweep and str.contains(lSweepSource, "H1"))
     if directEntryEnabled and directSourceOkLong
         float directStopLong = candidateStopLong
         if directStopLong < close
@@ -2774,7 +2774,7 @@ if sStage == 3 and na(sLimit)
 
     // [Entrée directe] Symétrique du bloc Long : additif, n'écrit jamais
     // sLimit/sStop/sTp1/sTp2/sLiquidity.
-    bool directSourceOkShort = (directAllowPdSweep and str.contains(sSweepSource, "PD")) or (directAllowAsiaSweep and str.contains(sSweepSource, "ASIA")) or (directAllowLonSweep and str.contains(sSweepSource, "LON")) or (directAllowOrSweep and str.contains(sSweepSource, "OR")) or (directAllowM15Sweep and str.contains(sSweepSource, "M15"))
+    bool directSourceOkShort = (directAllowPdSweep and str.contains(sSweepSource, "PD")) or (directAllowAsiaSweep and str.contains(sSweepSource, "ASIA")) or (directAllowLonSweep and str.contains(sSweepSource, "LON")) or (directAllowOrSweep and str.contains(sSweepSource, "OR")) or (directAllowM15Sweep and str.contains(sSweepSource, "M15")) or (directAllowPwSweep and str.contains(sSweepSource, "PW")) or (directAllowH1Sweep and str.contains(sSweepSource, "H1"))
     if directEntryEnabled and directSourceOkShort
         float directStopShort = candidateStopShort
         if close < directStopShort

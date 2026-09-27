@@ -74,3 +74,15 @@ def previous_day_high_low(df: pd.DataFrame) -> pd.DataFrame:
     pdh_pdl = daily.shift(1)
     pdh_pdl.columns = ["pdh", "pdl"]
     return pdh_pdl
+
+
+def previous_week_high_low(df: pd.DataFrame) -> pd.DataFrame:
+    """Full calendar-week (Mon-Sun) high/low, shifted by one week so each
+    row (indexed by week Period) holds the PWH/PWL applicable to that
+    trading week - mirrors the Pine indicator's
+    `request.security(syminfo.tickerid, "W", [high[1], low[1]], ...)`."""
+    week = df.index.to_period("W-SUN")
+    weekly = df.groupby(week).agg(high=("high", "max"), low=("low", "min"))
+    pwh_pwl = weekly.shift(1)
+    pwh_pwl.columns = ["pwh", "pwl"]
+    return pwh_pwl

@@ -35,7 +35,9 @@ SOURCE_SETS = {
     "pdh_pdl": ("pdh_pdl",),
     "or": ("or",),
     "m15": ("m15",),
-    "all5": ("pdh_pdl", "asia", "lon", "or", "m15"),
+    "pw": ("pw",),
+    "h1": ("h1",),
+    "all7": ("pdh_pdl", "asia", "lon", "or", "m15", "pw", "h1"),
 }
 POI_MODES = ["fvg", "ifvg"]
 
